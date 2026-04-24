@@ -31,7 +31,6 @@ import {
     SambaNova,
     Cloudflare,
     OpenRouter,
-    Volcengine,
     SiliconCloud,
     Novita,
     InternLM,
@@ -96,7 +95,6 @@ const MODEL_ICON_PATTERNS: ModelIconConfig[] = [
     { prefixes: ['nvidia', 'nemotron'], Avatar: Nvidia.Avatar, color: '#76B900' },
     { prefixes: ['azure'], Avatar: Azure.Avatar, color: '#0078D4' },
     { prefixes: ['aws', 'amazon', 'bedrock'], Avatar: Aws.Avatar, color: '#FF9900' },
-    { prefixes: ['volcengine'], Avatar: Volcengine.Avatar, color: '#3370FF' },
     { prefixes: ['siliconflow'], Avatar: SiliconCloud.Avatar, color: '#7C3AED' },
     // Inference providers
     { prefixes: ['groq'], Avatar: Groq.Avatar, color: '#F55036' },
@@ -137,4 +135,3 @@ export function getModelIcon(modelName: string): { Avatar: AvatarComponent; colo
     }
     return DEFAULT_CONFIG;
 }
-

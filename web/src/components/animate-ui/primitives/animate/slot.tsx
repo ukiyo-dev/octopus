@@ -20,6 +20,31 @@ type SlotProps<T extends HTMLElement = HTMLElement> = {
   children?: any;
 } & DOMMotionProps<T>;
 
+const INTRINSIC_MOTION_COMPONENTS: Record<string, React.ElementType> = {
+  a: motion.a,
+  article: motion.article,
+  button: motion.button,
+  div: motion.div,
+  footer: motion.footer,
+  h1: motion.h1,
+  h2: motion.h2,
+  h3: motion.h3,
+  header: motion.header,
+  img: motion.img,
+  input: motion.input,
+  label: motion.label,
+  li: motion.li,
+  main: motion.main,
+  nav: motion.nav,
+  ol: motion.ol,
+  p: motion.p,
+  section: motion.section,
+  span: motion.span,
+  svg: motion.svg,
+  textarea: motion.textarea,
+  ul: motion.ul,
+};
+
 function mergeRefs<T>(
   ...refs: (React.Ref<T> | undefined)[]
 ): React.RefCallback<T> {
@@ -58,33 +83,58 @@ function mergeProps<T extends HTMLElement>(
   return merged;
 }
 
+function cloneWithMergedRef<T extends HTMLElement>(
+  element: React.ReactElement,
+  props: AnyProps,
+  ref: React.Ref<T>,
+) {
+  return React.cloneElement(
+    element as React.ReactElement<AnyProps & React.RefAttributes<T>>,
+    {
+      ...(props as AnyProps & React.RefAttributes<T>),
+      ref,
+    },
+  );
+}
+
 function Slot<T extends HTMLElement = HTMLElement>({
   children,
   ref,
   ...props
 }: SlotProps<T>) {
+  if (!React.isValidElement(children)) return null;
+
   const isAlreadyMotion =
     typeof children.type === 'object' &&
     children.type !== null &&
     isMotionComponent(children.type);
 
-  const Base = React.useMemo(
-    () =>
-      isAlreadyMotion
-        ? (children.type as React.ElementType)
-        : motion.create(children.type as React.ElementType),
-    [isAlreadyMotion, children.type],
-  );
-
-  if (!React.isValidElement(children)) return null;
-
   const { ref: childRef, ...childProps } = children.props as AnyProps;
-
   const mergedProps = mergeProps(childProps, props);
+  const mergedRef = mergeRefs(childRef as React.Ref<T>, ref);
 
-  return (
-    <Base {...mergedProps} ref={mergeRefs(childRef as React.Ref<T>, ref)} />
-  );
+  if (isAlreadyMotion) {
+    // Forwarding refs through cloneElement is intentional here; the lint rule
+    // treats it as a render-time ref access even though no ref value is read.
+    // eslint-disable-next-line react-hooks/refs
+    return cloneWithMergedRef(children, mergedProps, mergedRef);
+  }
+
+  if (typeof children.type !== 'string') {
+    // eslint-disable-next-line react-hooks/refs
+    return cloneWithMergedRef(children, mergedProps, mergedRef);
+  }
+
+  const Base = isAlreadyMotion
+    ? (children.type as React.ElementType)
+    : INTRINSIC_MOTION_COMPONENTS[children.type as keyof typeof INTRINSIC_MOTION_COMPONENTS];
+
+  if (!Base) {
+    // eslint-disable-next-line react-hooks/refs
+    return cloneWithMergedRef(children, mergedProps, mergedRef);
+  }
+
+  return <Base {...mergedProps} ref={mergedRef} />;
 }
 
 export {

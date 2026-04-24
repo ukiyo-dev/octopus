@@ -3,17 +3,17 @@ package op
 import (
 	"context"
 	"fmt"
-	"strings"
+	"slices"
 
 	"github.com/bestruirui/octopus/internal/db"
 	"github.com/bestruirui/octopus/internal/model"
 	"github.com/bestruirui/octopus/internal/utils/cache"
+	"github.com/dlclark/regexp2"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 )
 
 var groupCache = cache.New[int, model.Group](16)
-var groupMap = cache.New[string, model.Group](16)
 
 func GroupList(ctx context.Context) ([]model.Group, error) {
 	groups := make([]model.Group, 0, groupCache.Len())
@@ -40,25 +40,42 @@ func GroupGet(id int, ctx context.Context) (*model.Group, error) {
 }
 
 func GroupGetEnabledMap(name string, ctx context.Context) (model.Group, error) {
-	group, ok := groupMap.Get(name)
-	if !ok {
-		// Fall back to startswith: find the group with the longest name that is a prefix of the requested model name
-		var best *model.Group
-		bestLen := -1
-		for gname, g := range groupMap.GetAll() {
-			if strings.HasPrefix(name, gname) && len(gname) > bestLen {
-				tmp := g
-				best = &tmp
-				bestLen = len(gname)
-			}
-		}
-		if best == nil {
-			return model.Group{}, fmt.Errorf("group not found")
-		}
-		group = *best
-		ok = true
+	groups := make([]model.Group, 0, groupCache.Len())
+	for _, group := range groupCache.GetAll() {
+		groups = append(groups, group)
 	}
-	_ = ok
+
+	slices.SortFunc(groups, func(a, b model.Group) int {
+		return a.ID - b.ID
+	})
+
+	var group model.Group
+	matched := false
+	for _, candidate := range groups {
+		if candidate.MatchRegex == "" {
+			if candidate.Name != name {
+				continue
+			}
+			group = candidate
+			matched = true
+			break
+		}
+		re, err := regexp2.Compile(candidate.MatchRegex, regexp2.ECMAScript)
+		if err != nil {
+			continue
+		}
+		ok, err := re.MatchString(name)
+		if err != nil || !ok {
+			continue
+		}
+		group = candidate
+		matched = true
+		break
+	}
+	if !matched {
+		return model.Group{}, fmt.Errorf("group not found")
+	}
+
 	if len(group.Items) == 0 {
 		group.Items = nil
 		return group, nil
@@ -81,16 +98,14 @@ func GroupCreate(group *model.Group, ctx context.Context) error {
 		return err
 	}
 	groupCache.Set(group.ID, *group)
-	groupMap.Set(group.Name, *group)
 	return nil
 }
 
 func GroupUpdate(req *model.GroupUpdateRequest, ctx context.Context) (*model.Group, error) {
-	oldGroup, ok := groupCache.Get(req.ID)
+	_, ok := groupCache.Get(req.ID)
 	if !ok {
 		return nil, fmt.Errorf("group not found")
 	}
-	oldName := oldGroup.Name
 
 	tx := db.GetDB().WithContext(ctx).Begin()
 	defer func() {
@@ -190,14 +205,11 @@ func GroupUpdate(req *model.GroupUpdateRequest, ctx context.Context) (*model.Gro
 	}
 
 	group, _ := groupCache.Get(req.ID)
-	if oldName != "" && oldName != group.Name {
-		groupMap.Del(oldName)
-	}
 	return &group, nil
 }
 
 func GroupDel(id int, ctx context.Context) error {
-	group, ok := groupCache.Get(id)
+	_, ok := groupCache.Get(id)
 	if !ok {
 		return fmt.Errorf("group not found")
 	}
@@ -224,7 +236,6 @@ func GroupDel(id int, ctx context.Context) error {
 	}
 
 	groupCache.Del(id)
-	groupMap.Del(group.Name)
 	return nil
 }
 
@@ -378,7 +389,6 @@ func groupRefreshCache(ctx context.Context) error {
 	}
 	for _, group := range groups {
 		groupCache.Set(group.ID, group)
-		groupMap.Set(group.Name, group)
 	}
 	return nil
 }
@@ -391,7 +401,6 @@ func groupRefreshCacheByID(id int, ctx context.Context) error {
 		return err
 	}
 	groupCache.Set(group.ID, group)
-	groupMap.Set(group.Name, group)
 	return nil
 }
 
@@ -408,7 +417,6 @@ func groupRefreshCacheByIDs(ids []int, ctx context.Context) error {
 	}
 	for _, group := range groups {
 		groupCache.Set(group.ID, group)
-		groupMap.Set(group.Name, group)
 	}
 	return nil
 }

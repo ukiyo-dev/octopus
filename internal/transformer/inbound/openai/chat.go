@@ -14,7 +14,25 @@ type ChatInbound struct {
 	storedResponse *model.InternalLLMResponse
 }
 
-func (i *ChatInbound) TransformRequest(ctx context.Context, body []byte) (*model.InternalLLMRequest, error) {
+func (i *ChatInbound) Probe(ctx context.Context, body []byte) (*model.ProbedRequest, error) {
+	var minimal struct {
+		Model  string `json:"model"`
+		Stream *bool  `json:"stream"`
+	}
+	if err := json.Unmarshal(body, &minimal); err != nil {
+		return nil, err
+	}
+
+	return &model.ProbedRequest{
+		RawRequest:    body,
+		InboundFormat: model.APIFormatOpenAIChatCompletion,
+		Model:         minimal.Model,
+		Stream:        minimal.Stream != nil && *minimal.Stream,
+		RequestKind:   model.RequestKindChat,
+	}, nil
+}
+
+func (i *ChatInbound) Parse(ctx context.Context, body []byte) (*model.InternalLLMRequest, error) {
 	var request model.InternalLLMRequest
 	if err := json.Unmarshal(body, &request); err != nil {
 		return nil, err

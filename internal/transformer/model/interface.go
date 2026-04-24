@@ -6,8 +6,11 @@ import (
 )
 
 type Inbound interface {
-	// 入站请求转为内部通用格式
-	TransformRequest(ctx context.Context, body []byte) (*InternalLLMRequest, error)
+	// Probe extracts the minimum request metadata needed for routing and response handling.
+	Probe(ctx context.Context, body []byte) (*ProbedRequest, error)
+
+	// Parse converts the inbound request to the internal model when protocol conversion is required.
+	Parse(ctx context.Context, body []byte) (*InternalLLMRequest, error)
 
 	// 将出站内部通用响应转为入站对应的响应格式
 	TransformResponse(ctx context.Context, response *InternalLLMResponse) ([]byte, error)
@@ -25,6 +28,9 @@ type Outbound interface {
 	// 将入站内部通用请求转为出站对应的请求格式
 	TransformRequest(ctx context.Context, request *InternalLLMRequest, baseUrl, key string) (*http.Request, error)
 
+	// TargetFormat identifies the outbound wire protocol.
+	TargetFormat() APIFormat
+
 	// 将出站响应转为内部通用响应格式
 	TransformResponse(ctx context.Context, response *http.Response) (*InternalLLMResponse, error)
 
@@ -36,7 +42,8 @@ type Outbound interface {
 请求流程
 非流式
 
-client		-> inbound.TransformRequest(ctx, body)
+client		-> inbound.Probe(ctx, body)
+			-> inbound.Parse(ctx, body) // only when protocol conversion is required
 			-> outbound.TransformRequest(ctx, request)
  			-> http.Do(request)
  			-> outbound.TransformResponse(ctx, response)
@@ -44,8 +51,8 @@ client		-> inbound.TransformRequest(ctx, body)
 															-> client
 
 流式
-client		-> inbound.TransformRequest(ctx, body)
-        	-> outbound.TransformStream(ctx, chunk)
+client		-> inbound.Probe(ctx, body)
+        	-> inbound.Parse(ctx, body) // only when protocol conversion is required
         	-> http.Do(request)
         	-> outbound.TransformStream(ctx, chunk)
         	-> inbound.TransformStream(ctx, chunk)

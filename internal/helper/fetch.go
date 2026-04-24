@@ -3,6 +3,7 @@ package helper
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strings"
 
@@ -18,12 +19,14 @@ func FetchModels(ctx context.Context, request model.Channel) ([]string, error) {
 	}
 	fetchModel := make([]string, 0)
 	switch request.Type {
+	case outbound.OutboundTypeOpenAIChat, outbound.OutboundTypeOpenAIResponse, outbound.OutboundTypeOpenAIEmbedding:
+		fetchModel, err = fetchOpenAIModels(client, ctx, request)
 	case outbound.OutboundTypeAnthropic:
 		fetchModel, err = fetchAnthropicModels(client, ctx, request)
 	case outbound.OutboundTypeGemini:
 		fetchModel, err = fetchGeminiModels(client, ctx, request)
 	default:
-		fetchModel, err = fetchOpenAIModels(client, ctx, request)
+		return nil, fmt.Errorf("unsupported channel type: %d", request.Type)
 	}
 	if err != nil {
 		return nil, err

@@ -75,7 +75,6 @@ export function GroupCard({ group }: { group: Group }) {
     const { data: modelChannels = [] } = useModelChannelList();
 
     const [confirmDelete, setConfirmDelete] = useState(false);
-    const [members, setMembers] = useState<SelectedMember[]>([]);
     const isDragging = useRef(false);
     const weightTimerRef = useRef<NodeJS.Timeout | null>(null);
     const membersRef = useRef<SelectedMember[]>([]);
@@ -104,19 +103,41 @@ export function GroupCard({ group }: { group: Group }) {
         [group.items, channelNameByKey, enabledByKey]
     );
 
-    useEffect(() => {
-        if (!isDragging.current) setMembers([...displayMembers]);
-    }, [displayMembers]);
+    const [members, setMembers] = useState<SelectedMember[]>(displayMembers);
+
+    const currentMembers = useMemo(() => {
+        if (members.length === 0) return displayMembers;
+
+        const latestById = new Map(displayMembers.map((member) => [member.id, member] as const));
+        const merged = members.reduce<SelectedMember[]>((acc, member) => {
+            const latest = latestById.get(member.id);
+            if (!latest) return acc;
+
+            acc.push({
+                ...latest,
+                weight: member.weight,
+            });
+
+            return acc;
+        }, []);
+
+        const mergedIds = new Set(merged.map((member) => member.id));
+        const appended = displayMembers.filter((member) => !mergedIds.has(member.id));
+        return [...merged, ...appended];
+    }, [displayMembers, members]);
 
     useEffect(() => {
-        membersRef.current = members;
-    }, [members]);
+        membersRef.current = currentMembers;
+    }, [currentMembers]);
 
     useEffect(() => {
         return () => { if (weightTimerRef.current) clearTimeout(weightTimerRef.current); };
     }, []);
 
-    const onSuccess = useCallback(() => toast.success(t('toast.updated')), [t]);
+    const onSuccess = useCallback(() => {
+        setMembers([]);
+        toast.success(t('toast.updated'));
+    }, [t]);
     const onError = useCallback((error: Error) => toast.error(t('toast.updateFailed'), { description: error.message }), [t]);
 
     // Avoid UI flicker: drag-reorder also uses the same mutation, so only "mode switch" should lock mode buttons.
@@ -139,6 +160,7 @@ export function GroupCard({ group }: { group: Group }) {
     const handleDragFinish = useCallback(() => { isDragging.current = false; }, []);
 
     const handleDropReorder = useCallback((nextMembers: SelectedMember[]) => {
+        setMembers(nextMembers);
         const itemsToUpdate = nextMembers
             .map((m, i) => ({ member: m, newPriority: i + 1 }))
             .filter(({ member, newPriority }) => {
@@ -151,12 +173,15 @@ export function GroupCard({ group }: { group: Group }) {
     }, [group.id, priorityByItemId, updateGroup, onSuccess, onError]);
 
     const handleRemoveMember = useCallback((id: string) => {
-        const member = members.find((m) => m.id === id);
+        const member = currentMembers.find((m) => m.id === id);
         if (member?.item_id !== undefined) updateGroup.mutate({ id: group.id!, items_to_delete: [member.item_id] }, { onSuccess, onError });
-    }, [members, group.id, updateGroup, onSuccess, onError]);
+    }, [currentMembers, group.id, updateGroup, onSuccess, onError]);
 
     const handleWeightChange = useCallback((id: string, weight: number) => {
-        setMembers((prev) => prev.map((m) => m.id === id ? { ...m, weight } : m));
+        setMembers((prev) => {
+            const base = prev.length > 0 ? prev : currentMembers;
+            return base.map((m) => m.id === id ? { ...m, weight } : m);
+        });
         if (weightTimerRef.current) clearTimeout(weightTimerRef.current);
         weightTimerRef.current = setTimeout(() => {
             const member = membersRef.current.find((m) => m.id === id);
@@ -168,7 +193,7 @@ export function GroupCard({ group }: { group: Group }) {
                 { onSuccess, onError }
             );
         }, 500);
-    }, [group.id, priorityByItemId, updateGroup, onSuccess, onError]);
+    }, [currentMembers, group.id, priorityByItemId, updateGroup, onSuccess, onError]);
 
     const handleSubmitEdit = useCallback((values: GroupEditorValues, onDone?: () => void) => {
         if (!group.id) return;
@@ -267,7 +292,7 @@ export function GroupCard({ group }: { group: Group }) {
                             <MorphingDialogContent className="relative w-screen max-w-full md:max-w-4xl bg-card text-card-foreground px-6 py-4 rounded-3xl h-[calc(100vh-2rem)] flex flex-col overflow-hidden">
                                 <EditDialogContent
                                     group={group}
-                                    displayMembers={displayMembers}
+                                    displayMembers={currentMembers}
                                     isSubmitting={updateGroup.isPending}
                                     onSubmit={handleSubmitEdit}
                                 />
@@ -339,7 +364,7 @@ export function GroupCard({ group }: { group: Group }) {
 
             <section className="rounded-xl border border-border/50 bg-muted/30 overflow-hidden relative h-101">
                 <MemberList
-                    members={members}
+                    members={currentMembers}
                     onReorder={setMembers}
                     onRemove={handleRemoveMember}
                     onWeightChange={handleWeightChange}

@@ -15,6 +15,10 @@ import (
 
 type ChatOutbound struct{}
 
+func (o *ChatOutbound) TargetFormat() model.APIFormat {
+	return model.APIFormatOpenAIChatCompletion
+}
+
 func (o *ChatOutbound) TransformRequest(ctx context.Context, request *model.InternalLLMRequest, baseUrl, key string) (*http.Request, error) {
 	isNativeFormat := request.RawAPIFormat == model.APIFormatOpenAIChatCompletion
 	isPassthroughFormat := request.RawAPIFormat == model.APIFormatPassthrough

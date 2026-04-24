@@ -1,29 +1,55 @@
 package model
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
-	"slices"
 	"strings"
 )
 
 type APIFormat string
+type RequestKind string
+type ResponseStatus string
+type requestPathContextKey struct{}
 
 const (
-	APIFormatOpenAIChatCompletion  APIFormat = "openai/chat_completions"
-	APIFormatOpenAIResponse        APIFormat = "openai/responses"
-	APIFormatOpenAIImageGeneration APIFormat = "openai/image_generation"
-	APIFormatOpenAIEmbedding       APIFormat = "openai/embeddings"
-	APIFormatGeminiContents        APIFormat = "gemini/contents"
-	APIFormatAnthropicMessage      APIFormat = "anthropic/messages"
-	APIFormatAiSDKText             APIFormat = "aisdk/text"
-	APIFormatAiSDKDataStream       APIFormat = "aisdk/datastream"
+	APIFormatOpenAIChatCompletion APIFormat = "openai/chat_completions"
+	APIFormatOpenAIResponse       APIFormat = "openai/responses"
+	APIFormatOpenAIEmbedding      APIFormat = "openai/embeddings"
+	APIFormatGeminiContents       APIFormat = "gemini/contents"
+	APIFormatAnthropicMessage     APIFormat = "anthropic/messages"
 	// APIFormatPassthrough is used for unknown/future endpoints that are forwarded as raw bytes.
 	APIFormatPassthrough APIFormat = "passthrough"
+
+	RequestKindChat        RequestKind = "chat"
+	RequestKindEmbedding   RequestKind = "embedding"
+	RequestKindPassthrough RequestKind = "passthrough"
+
+	ResponseStatusComplete ResponseStatus = "complete"
+	ResponseStatusPartial  ResponseStatus = "partial"
 )
+
+type ProbedRequest struct {
+	RawRequest    []byte
+	InboundFormat APIFormat
+	Model         string
+	Stream        bool
+	Query         url.Values
+	RawPath       string
+	RequestKind   RequestKind
+}
+
+func WithRequestPath(ctx context.Context, path string) context.Context {
+	return context.WithValue(ctx, requestPathContextKey{}, path)
+}
+
+func RequestPathFromContext(ctx context.Context) (string, bool) {
+	path, ok := ctx.Value(requestPathContextKey{}).(string)
+	return path, ok
+}
 
 // Request is the unified llm request model for AxonHub, to keep compatibility with major app and framework.
 // It choose to base on the OpenAI chat completion request, but add some extra fields to support more features.
@@ -290,48 +316,10 @@ func (r *InternalLLMRequest) Validate() error {
 
 	if isChatRequest {
 		r.fillMissingToolCallIDsFromToolMessages()
-		// r.fillMissingToolCallIDs()
 	}
 
 	return nil
 }
-
-func (r *InternalLLMRequest) fillMissingToolCallIDs() {
-	usedIDs := make(map[string]struct{})
-	for _, msg := range r.Messages {
-		for _, tc := range msg.ToolCalls {
-			if tc.ID == "" {
-				continue
-			}
-			usedIDs[tc.ID] = struct{}{}
-		}
-	}
-
-	sequence := 0
-	for messageIndex := range r.Messages {
-		for toolCallIndex := range r.Messages[messageIndex].ToolCalls {
-			toolCall := &r.Messages[messageIndex].ToolCalls[toolCallIndex]
-			if toolCall.ID != "" {
-				continue
-			}
-
-			candidate := fmt.Sprintf("call_octopus_%d_%d", messageIndex, toolCallIndex)
-			if _, exists := usedIDs[candidate]; exists {
-				for {
-					candidate = fmt.Sprintf("call_octopus_%d", sequence)
-					sequence++
-					if _, conflict := usedIDs[candidate]; !conflict {
-						break
-					}
-				}
-			}
-
-			toolCall.ID = candidate
-			usedIDs[candidate] = struct{}{}
-		}
-	}
-}
-
 
 func (r *InternalLLMRequest) fillMissingToolCallIDsFromToolMessages() {
 	for msgIndex := 0; msgIndex < len(r.Messages); msgIndex++ {
@@ -402,10 +390,6 @@ func (r *InternalLLMRequest) ClearHelpFields() {
 
 	r.ExtraBody = nil
 	r.Include = nil
-}
-
-func (r *InternalLLMRequest) IsImageGenerationRequest() bool {
-	return len(r.Modalities) > 0 && slices.Contains(r.Modalities, "image")
 }
 
 type TransformOptions struct {
@@ -682,6 +666,8 @@ type InternalLLMResponse struct {
 	RawResponse []byte `json:"-"`
 	// RawResponseFormat identifies the API format of the bytes stored in RawResponse.
 	RawResponseFormat APIFormat `json:"-"`
+	// ResponseStatus indicates whether the logged response is complete or partial.
+	ResponseStatus ResponseStatus `json:"-"`
 }
 
 func (r *InternalLLMResponse) ClearHelpFields() {

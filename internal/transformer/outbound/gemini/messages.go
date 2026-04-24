@@ -18,13 +18,25 @@ import (
 
 type MessagesOutbound struct{}
 
-func (o *MessagesOutbound) TransformRequest(ctx context.Context, request *model.InternalLLMRequest, baseUrl, key string) (*http.Request, error) {
-	// Convert internal request to Gemini format
-	geminiReq := convertLLMToGeminiRequest(request)
+func (o *MessagesOutbound) TargetFormat() model.APIFormat {
+	return model.APIFormatGeminiContents
+}
 
-	body, err := json.Marshal(geminiReq)
-	if err != nil {
-		return nil, fmt.Errorf("failed to marshal gemini request: %w", err)
+func (o *MessagesOutbound) TransformRequest(ctx context.Context, request *model.InternalLLMRequest, baseUrl, key string) (*http.Request, error) {
+	passthrough := request.RawAPIFormat == model.APIFormatGeminiContents && len(request.RawRequest) > 0
+
+	var body []byte
+	if passthrough {
+		body = request.RawRequest
+	} else {
+		// Convert internal request to Gemini format
+		geminiReq := convertLLMToGeminiRequest(request)
+
+		var err error
+		body, err = json.Marshal(geminiReq)
+		if err != nil {
+			return nil, fmt.Errorf("failed to marshal gemini request: %w", err)
+		}
 	}
 
 	// Build URL
@@ -49,6 +61,11 @@ func (o *MessagesOutbound) TransformRequest(ctx context.Context, request *model.
 
 	// Add API key as query parameter
 	q := parsedUrl.Query()
+	for key, values := range request.Query {
+		for _, value := range values {
+			q.Add(key, value)
+		}
+	}
 	q.Set("key", key)
 	if isStream {
 		q.Set("alt", "sse")
@@ -82,7 +99,10 @@ func (o *MessagesOutbound) TransformResponse(ctx context.Context, response *http
 	}
 
 	// Convert Gemini response to internal format
-	return convertGeminiToLLMResponse(&geminiResp, false), nil
+	result := convertGeminiToLLMResponse(&geminiResp, false)
+	result.RawResponse = body
+	result.RawResponseFormat = model.APIFormatGeminiContents
+	return result, nil
 }
 
 func (o *MessagesOutbound) TransformStream(ctx context.Context, eventData []byte) (*model.InternalLLMResponse, error) {
@@ -100,7 +120,10 @@ func (o *MessagesOutbound) TransformStream(ctx context.Context, eventData []byte
 	}
 
 	// Convert to internal format
-	return convertGeminiToLLMResponse(&geminiResp, true), nil
+	result := convertGeminiToLLMResponse(&geminiResp, true)
+	result.RawResponse = eventData
+	result.RawResponseFormat = model.APIFormatGeminiContents
+	return result, nil
 }
 
 // Helper functions

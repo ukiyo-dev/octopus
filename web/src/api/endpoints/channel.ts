@@ -11,6 +11,7 @@ export enum ChannelType {
     OpenAIResponse = 1,
     Anthropic = 2,
     Gemini = 3,
+    // Deprecated and no longer supported. Kept for compatibility with stored data.
     Volcengine = 4,
     OpenAIEmbedding = 5,
 }

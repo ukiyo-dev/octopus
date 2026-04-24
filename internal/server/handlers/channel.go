@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
@@ -14,6 +15,7 @@ import (
 	"github.com/bestruirui/octopus/internal/server/resp"
 	"github.com/bestruirui/octopus/internal/server/router"
 	"github.com/bestruirui/octopus/internal/task"
+	"github.com/bestruirui/octopus/internal/transformer/outbound"
 	"github.com/gin-gonic/gin"
 )
 
@@ -76,6 +78,10 @@ func createChannel(c *gin.Context) {
 		resp.Error(c, http.StatusBadRequest, resp.ErrInvalidJSON)
 		return
 	}
+	if err := validateChannelType(channel.Type); err != nil {
+		resp.Error(c, http.StatusBadRequest, err.Error())
+		return
+	}
 	if err := op.ChannelCreate(&channel, c.Request.Context()); err != nil {
 		resp.Error(c, http.StatusInternalServerError, err.Error())
 		return
@@ -99,6 +105,12 @@ func updateChannel(c *gin.Context) {
 	if err := c.ShouldBindJSON(&req); err != nil {
 		resp.Error(c, http.StatusBadRequest, resp.ErrInvalidJSON)
 		return
+	}
+	if req.Type != nil {
+		if err := validateChannelType(*req.Type); err != nil {
+			resp.Error(c, http.StatusBadRequest, err.Error())
+			return
+		}
 	}
 	channel, err := op.ChannelUpdate(&req, c.Request.Context())
 	if err != nil {
@@ -154,6 +166,10 @@ func fetchModel(c *gin.Context) {
 		resp.Error(c, http.StatusBadRequest, resp.ErrInvalidJSON)
 		return
 	}
+	if err := validateChannelType(request.Type); err != nil {
+		resp.Error(c, http.StatusBadRequest, err.Error())
+		return
+	}
 	models, err := helper.FetchModels(c.Request.Context(), request)
 	if err != nil {
 		resp.Error(c, http.StatusInternalServerError, err.Error())
@@ -170,4 +186,17 @@ func syncChannel(c *gin.Context) {
 func getLastSyncTime(c *gin.Context) {
 	time := task.GetLastSyncModelsTime()
 	resp.Success(c, time)
+}
+
+func validateChannelType(channelType outbound.OutboundType) error {
+	switch channelType {
+	case outbound.OutboundTypeOpenAIChat,
+		outbound.OutboundTypeOpenAIResponse,
+		outbound.OutboundTypeAnthropic,
+		outbound.OutboundTypeGemini,
+		outbound.OutboundTypeOpenAIEmbedding:
+		return nil
+	default:
+		return fmt.Errorf("unsupported channel type: %d", channelType)
+	}
 }

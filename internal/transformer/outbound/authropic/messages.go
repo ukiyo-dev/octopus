@@ -30,6 +30,10 @@ type MessageOutbound struct {
 	passthrough bool
 }
 
+func (o *MessageOutbound) TargetFormat() model.APIFormat {
+	return model.APIFormatAnthropicMessage
+}
+
 func (o *MessageOutbound) TransformRequest(ctx context.Context, request *model.InternalLLMRequest, baseUrl, key string) (*http.Request, error) {
 	if request == nil {
 		return nil, fmt.Errorf("request is nil")

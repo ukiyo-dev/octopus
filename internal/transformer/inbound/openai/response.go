@@ -53,7 +53,25 @@ type ResponseInbound struct {
 	completedEventResponse []byte
 }
 
-func (i *ResponseInbound) TransformRequest(ctx context.Context, body []byte) (*model.InternalLLMRequest, error) {
+func (i *ResponseInbound) Probe(ctx context.Context, body []byte) (*model.ProbedRequest, error) {
+	var minimal struct {
+		Model  string `json:"model"`
+		Stream *bool  `json:"stream"`
+	}
+	if err := json.Unmarshal(body, &minimal); err != nil {
+		return nil, fmt.Errorf("failed to decode responses api request: %w", err)
+	}
+
+	return &model.ProbedRequest{
+		RawRequest:    body,
+		InboundFormat: model.APIFormatOpenAIResponse,
+		Model:         minimal.Model,
+		Stream:        minimal.Stream != nil && *minimal.Stream,
+		RequestKind:   model.RequestKindChat,
+	}, nil
+}
+
+func (i *ResponseInbound) Parse(ctx context.Context, body []byte) (*model.InternalLLMRequest, error) {
 	var req ResponsesRequest
 	if err := json.Unmarshal(body, &req); err != nil {
 		return nil, fmt.Errorf("failed to decode responses api request: %w", err)
@@ -674,8 +692,8 @@ func (i *ResponseInbound) GetInternalResponse(ctx context.Context) (*model.Inter
 
 			if reasoning != "" {
 				outputItems = append(outputItems, map[string]interface{}{
-					"id": generateItemID(),
-					"type": "reasoning",
+					"id":     generateItemID(),
+					"type":   "reasoning",
 					"status": "completed",
 					"summary": []map[string]interface{}{
 						{
@@ -689,21 +707,21 @@ func (i *ResponseInbound) GetInternalResponse(ctx context.Context) (*model.Inter
 			if len(i.toolCalls) > 0 {
 				for _, tc := range result.Choices[0].Message.ToolCalls {
 					outputItems = append(outputItems, map[string]interface{}{
-						"id": tc.ID,
-						"type": "function_call",
-						"call_id": tc.ID,
-						"name": tc.Function.Name,
+						"id":        tc.ID,
+						"type":      "function_call",
+						"call_id":   tc.ID,
+						"name":      tc.Function.Name,
 						"arguments": tc.Function.Arguments,
-						"status": "completed",
+						"status":    "completed",
 					})
 				}
 			}
 
 			if text != "" {
 				outputItems = append(outputItems, map[string]interface{}{
-					"id": generateItemID(),
-					"type": "message",
-					"role": "assistant",
+					"id":     generateItemID(),
+					"type":   "message",
+					"role":   "assistant",
 					"status": "completed",
 					"content": map[string]interface{}{
 						"items": []map[string]interface{}{

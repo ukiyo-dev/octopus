@@ -4,10 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	"github.com/bestruirui/octopus/internal/transformer/model"
 	"github.com/bestruirui/octopus/internal/utils/log"
-	"github.com/bestruirui/octopus/internal/utils/tokenizer"
 	"github.com/bestruirui/octopus/internal/utils/xurl"
 	"github.com/samber/lo"
 )
@@ -25,7 +25,6 @@ type MessagesInbound struct {
 	contentIndex              int64
 	stopReason                *string
 	toolCallIndices           map[int]bool // Track which tool call indices we've seen
-	inputToken                int64
 
 	// Stream chunks storage for aggregation
 	streamChunks []*model.InternalLLMResponse
@@ -33,7 +32,25 @@ type MessagesInbound struct {
 	storedResponse *model.InternalLLMResponse
 }
 
-func (i *MessagesInbound) TransformRequest(ctx context.Context, body []byte) (*model.InternalLLMRequest, error) {
+func (i *MessagesInbound) Probe(ctx context.Context, body []byte) (*model.ProbedRequest, error) {
+	var minimal struct {
+		Model  string `json:"model"`
+		Stream *bool  `json:"stream"`
+	}
+	if err := json.Unmarshal(body, &minimal); err != nil {
+		return nil, err
+	}
+
+	return &model.ProbedRequest{
+		RawRequest:    body,
+		InboundFormat: model.APIFormatAnthropicMessage,
+		Model:         minimal.Model,
+		Stream:        minimal.Stream != nil && *minimal.Stream,
+		RequestKind:   model.RequestKindChat,
+	}, nil
+}
+
+func (i *MessagesInbound) Parse(ctx context.Context, body []byte) (*model.InternalLLMRequest, error) {
 	var anthropicReq MessageRequest
 	if err := json.Unmarshal(body, &anthropicReq); err != nil {
 		return nil, err
@@ -69,7 +86,6 @@ func (i *MessagesInbound) TransformRequest(ctx context.Context, body []byte) (*m
 					Content: systemContent,
 				},
 			})
-			i.inputToken += int64(tokenizer.CountTokens(*systemContent, chatReq.Model))
 		} else if len(anthropicReq.System.MultiplePrompts) > 0 {
 			// Mark that system was originally in array format
 			chatReq.TransformerMetadata["anthropic_system_array_format"] = "true"
@@ -82,7 +98,6 @@ func (i *MessagesInbound) TransformRequest(ctx context.Context, body []byte) (*m
 					},
 					CacheControl: convertToLLMCacheControl(prompt.CacheControl),
 				}
-				i.inputToken += int64(tokenizer.CountTokens(prompt.Text, chatReq.Model))
 				messages = append(messages, msg)
 			}
 		}
@@ -106,7 +121,6 @@ func (i *MessagesInbound) TransformRequest(ctx context.Context, body []byte) (*m
 				Content: msg.Content.Content,
 			}
 			hasContent = true
-			i.inputToken += int64(tokenizer.CountTokens(*msg.Content.Content, chatReq.Model))
 		} else if len(msg.Content.MultipleContent) > 0 {
 			contentParts := make([]model.MessageContentPart, 0, len(msg.Content.MultipleContent))
 
@@ -135,7 +149,6 @@ func (i *MessagesInbound) TransformRequest(ctx context.Context, body []byte) (*m
 						Text:         block.Text,
 						CacheControl: convertToLLMCacheControl(block.CacheControl),
 					})
-					i.inputToken += int64(tokenizer.CountTokens(*block.Text, chatReq.Model))
 					hasContent = true
 				case "image":
 					if block.Source != nil {
@@ -184,7 +197,6 @@ func (i *MessagesInbound) TransformRequest(ctx context.Context, body []byte) (*m
 										Type: "text",
 										Text: contentBlock.Text,
 									})
-									i.inputToken += int64(tokenizer.CountTokens(*contentBlock.Text, chatReq.Model))
 								}
 							}
 
@@ -206,6 +218,8 @@ func (i *MessagesInbound) TransformRequest(ctx context.Context, body []byte) (*m
 						CacheControl: convertToLLMCacheControl(block.CacheControl),
 					})
 					hasContent = true
+				case "document":
+					return nil, fmt.Errorf("anthropic document content is only supported for same-protocol passthrough")
 				}
 			}
 
@@ -266,11 +280,7 @@ func (i *MessagesInbound) TransformRequest(ctx context.Context, body []byte) (*m
 				CacheControl: convertToLLMCacheControl(tool.CacheControl),
 			}
 			tools = append(tools, llmTool)
-			i.inputToken += int64(tokenizer.CountTokens(tool.Name, chatReq.Model))
-			i.inputToken += int64(tokenizer.CountTokens(tool.Description, chatReq.Model))
-			i.inputToken += int64(tokenizer.CountTokens(string(tool.InputSchema), chatReq.Model))
 		}
-		i.inputToken += int64(len(tools) * 3)
 
 		chatReq.Tools = tools
 	}
@@ -499,10 +509,7 @@ func (i *MessagesInbound) TransformStream(ctx context.Context, stream *model.Int
 	if !i.hasStarted {
 		i.hasStarted = true
 
-		usage := &Usage{
-			InputTokens:  i.inputToken,
-			OutputTokens: 1,
-		}
+		var usage *Usage
 		if stream.Usage != nil {
 			usage = i.convertUsage(stream.Usage)
 		}
@@ -1009,26 +1016,61 @@ func (i *MessagesInbound) GetInternalResponse(ctx context.Context) (*model.Inter
 	return result, nil
 }
 
-// extractPassthroughResponse builds a metrics-ready InternalLLMResponse from raw
-// Anthropic SSE chunks (passthrough mode) by scanning for message_start (input tokens)
-// and message_delta (output tokens / stop reason) events.
+// extractPassthroughResponse reconstructs a complete InternalLLMResponse from raw
+// Anthropic SSE chunks. The reassembled Message is JSON-marshaled into RawResponse
+// for logging; Usage is extracted inline for billing.
 func (i *MessagesInbound) extractPassthroughResponse() (*model.InternalLLMResponse, error) {
-	result := &model.InternalLLMResponse{Object: "chat.completion"}
+	msg := reconstructMessageFromSSE(i.streamChunks)
+	i.streamChunks = nil
 
-	var inputTokens, outputTokens, cacheRead, cacheCreate int64
-
-	for _, chunk := range i.streamChunks {
-		if chunk.ID != "" {
-			result.ID = chunk.ID
+	result := &model.InternalLLMResponse{
+		ID:     msg.ID,
+		Object: "chat.completion",
+		Model:  msg.Model,
+	}
+	if raw, err := json.Marshal(msg); err == nil {
+		result.RawResponse = raw
+	}
+	if u := msg.Usage; u != nil {
+		usage := &model.Usage{
+			PromptTokens:             u.InputTokens,
+			CompletionTokens:         u.OutputTokens,
+			TotalTokens:              u.InputTokens + u.OutputTokens + u.CacheReadInputTokens + u.CacheCreationInputTokens,
+			CacheCreationInputTokens: u.CacheCreationInputTokens,
+			AnthropicUsage:           true,
 		}
-		if chunk.Model != "" {
-			result.Model = chunk.Model
+		if u.CacheReadInputTokens > 0 {
+			usage.PromptTokensDetails = &model.PromptTokensDetails{
+				CachedTokens: u.CacheReadInputTokens,
+			}
 		}
+		result.Usage = usage
+	}
+	return result, nil
+}
 
+// reconstructMessageFromSSE builds a complete anthropic.Message from a slice of raw SSE
+// chunks, handling text, thinking, and tool_use content blocks.
+func reconstructMessageFromSSE(chunks []*model.InternalLLMResponse) *Message {
+	msg := &Message{Role: "assistant"}
+
+	type blockState struct {
+		typ      string
+		textBuf  strings.Builder
+		thinkBuf strings.Builder
+		sig      string
+		id       string
+		name     string
+		inputBuf strings.Builder
+	}
+	blocks := map[int64]*blockState{}
+	order := []int64{}
+	var inputUsage, outputUsage *Usage
+
+	for _, chunk := range chunks {
 		if len(chunk.RawResponse) == 0 {
 			continue
 		}
-
 		var ev StreamEvent
 		if err := json.Unmarshal(chunk.RawResponse, &ev); err != nil {
 			continue
@@ -1037,43 +1079,102 @@ func (i *MessagesInbound) extractPassthroughResponse() (*model.InternalLLMRespon
 		switch ev.Type {
 		case "message_start":
 			if ev.Message != nil {
-				if result.ID == "" {
-					result.ID = ev.Message.ID
+				if msg.ID == "" {
+					msg.ID = ev.Message.ID
 				}
-				if result.Model == "" {
-					result.Model = ev.Message.Model
+				if msg.Model == "" {
+					msg.Model = ev.Message.Model
 				}
-				if ev.Message.Usage != nil {
-					inputTokens = ev.Message.Usage.InputTokens
-					cacheRead = ev.Message.Usage.CacheReadInputTokens
-					cacheCreate = ev.Message.Usage.CacheCreationInputTokens
+				inputUsage = ev.Message.Usage
+			}
+		case "content_block_start":
+			if ev.ContentBlock != nil && ev.Index != nil {
+				bs := &blockState{typ: ev.ContentBlock.Type}
+				if bs.typ == "tool_use" {
+					bs.id = ev.ContentBlock.ID
+					bs.name = lo.FromPtr(ev.ContentBlock.Name)
+				}
+				blocks[*ev.Index] = bs
+				order = append(order, *ev.Index)
+			}
+		case "content_block_delta":
+			if ev.Delta == nil || ev.Delta.Type == nil || ev.Index == nil {
+				continue
+			}
+			bs := blocks[*ev.Index]
+			if bs == nil {
+				continue
+			}
+			switch *ev.Delta.Type {
+			case "text_delta":
+				if ev.Delta.Text != nil {
+					bs.textBuf.WriteString(*ev.Delta.Text)
+				}
+			case "thinking_delta":
+				if ev.Delta.Thinking != nil {
+					bs.thinkBuf.WriteString(*ev.Delta.Thinking)
+				}
+			case "signature_delta":
+				if ev.Delta.Signature != nil {
+					bs.sig = *ev.Delta.Signature
+				}
+			case "input_json_delta":
+				if ev.Delta.PartialJSON != nil {
+					bs.inputBuf.WriteString(*ev.Delta.PartialJSON)
 				}
 			}
 		case "message_delta":
-			if ev.Usage != nil {
-				outputTokens = ev.Usage.OutputTokens
+			outputUsage = ev.Usage
+			if ev.Delta != nil {
+				msg.StopReason = ev.Delta.StopReason
 			}
 		}
 	}
 
-	if inputTokens > 0 || outputTokens > 0 {
-		usage := &model.Usage{
-			PromptTokens:             inputTokens,
-			CompletionTokens:         outputTokens,
-			TotalTokens:              inputTokens + outputTokens + cacheRead + cacheCreate,
-			CacheCreationInputTokens: cacheCreate,
-			AnthropicUsage:           true,
-		}
-		if cacheRead > 0 {
-			usage.PromptTokensDetails = &model.PromptTokensDetails{
-				CachedTokens: cacheRead,
+	for _, idx := range order {
+		bs := blocks[idx]
+		switch bs.typ {
+		case "text":
+			t := bs.textBuf.String()
+			if t != "" {
+				msg.Content = append(msg.Content, MessageContentBlock{Type: "text", Text: &t})
 			}
+		case "thinking":
+			t := bs.thinkBuf.String()
+			msg.Content = append(msg.Content, MessageContentBlock{
+				Type:      "thinking",
+				Thinking:  &t,
+				Signature: &bs.sig,
+			})
+		case "tool_use":
+			raw := json.RawMessage(bs.inputBuf.String())
+			if !json.Valid(raw) {
+				raw = json.RawMessage("{}")
+			}
+			n := bs.name
+			msg.Content = append(msg.Content, MessageContentBlock{
+				Type:  "tool_use",
+				ID:    bs.id,
+				Name:  &n,
+				Input: raw,
+			})
 		}
-		result.Usage = usage
 	}
 
-	i.streamChunks = nil
-	return result, nil
+	u := &Usage{}
+	if inputUsage != nil {
+		u.InputTokens = inputUsage.InputTokens
+		u.CacheCreationInputTokens = inputUsage.CacheCreationInputTokens
+		u.CacheReadInputTokens = inputUsage.CacheReadInputTokens
+	}
+	if outputUsage != nil {
+		u.OutputTokens = outputUsage.OutputTokens
+	}
+	if u.InputTokens > 0 || u.OutputTokens > 0 {
+		msg.Usage = u
+	}
+
+	return msg
 }
 
 // mergeToolCall merges a tool call delta into the existing tool calls slice

@@ -2,6 +2,7 @@ package inbound
 
 import (
 	"github.com/bestruirui/octopus/internal/transformer/inbound/anthropic"
+	"github.com/bestruirui/octopus/internal/transformer/inbound/gemini"
 	"github.com/bestruirui/octopus/internal/transformer/inbound/openai"
 	"github.com/bestruirui/octopus/internal/transformer/model"
 )
@@ -15,9 +16,6 @@ const (
 	InboundTypeGemini
 	InboundTypeOpenAIEmbedding
 	InboundTypePassthrough
-
-	// Compatibility alias for legacy naming
-	InboundTypeOpenAI = InboundTypeOpenAIChat
 )
 
 var inboundFactories = map[InboundType]func() model.Inbound{
@@ -25,6 +23,7 @@ var inboundFactories = map[InboundType]func() model.Inbound{
 	InboundTypeOpenAIResponse:  func() model.Inbound { return &openai.ResponseInbound{} },
 	InboundTypeOpenAIEmbedding: func() model.Inbound { return &openai.EmbeddingInbound{} },
 	InboundTypeAnthropic:       func() model.Inbound { return &anthropic.MessagesInbound{} },
+	InboundTypeGemini:          func() model.Inbound { return &gemini.ContentsInbound{} },
 	InboundTypePassthrough:     func() model.Inbound { return &openai.PassthroughInbound{} },
 }
 

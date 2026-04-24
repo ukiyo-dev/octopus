@@ -16,6 +16,10 @@ import (
 
 type EmbeddingOutbound struct{}
 
+func (o *EmbeddingOutbound) TargetFormat() model.APIFormat {
+	return model.APIFormatOpenAIEmbedding
+}
+
 // OpenAIEmbeddingRequest 是 OpenAI 标准的请求格式（发送给上游）
 type OpenAIEmbeddingRequest struct {
 	Model          string               `json:"model"`

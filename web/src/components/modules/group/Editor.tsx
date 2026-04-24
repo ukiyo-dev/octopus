@@ -14,7 +14,7 @@ import { getModelIcon } from '@/lib/model-icons';
 import type { GroupMode } from '@/api/endpoints/group';
 import type { SelectedMember } from './ItemList';
 import { MemberList } from './ItemList';
-import { matchesGroupName, memberKey, normalizeKey, MODE_LABELS } from './utils';
+import { memberKey, normalizeKey, MODE_LABELS } from './utils';
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/animate-ui/components/animate/tooltip';
 import { HelpCircle } from 'lucide-react';
 
@@ -284,7 +284,10 @@ export function GroupEditor({
             }
         }
         if (!groupKey) return { matchedModelChannels: [], regexError: '' };
-        return { matchedModelChannels: modelChannels.filter((mc) => matchesGroupName(mc.name, groupKey)), regexError: '' };
+        return {
+            matchedModelChannels: modelChannels.filter((mc) => normalizeKey(mc.name) === groupKey),
+            regexError: '',
+        };
     }, [groupKey, regexKey, modelChannels]);
 
     const handleAddMember = useCallback((channel: LLMChannel) => {

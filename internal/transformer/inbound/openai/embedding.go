@@ -32,7 +32,21 @@ type OpenAIEmbeddingResponse struct {
 	Usage   *model.Usage            `json:"usage,omitempty"`
 }
 
-func (i *EmbeddingInbound) TransformRequest(ctx context.Context, body []byte) (*model.InternalLLMRequest, error) {
+func (i *EmbeddingInbound) Probe(ctx context.Context, body []byte) (*model.ProbedRequest, error) {
+	var openAIReq OpenAIEmbeddingRequest
+	if err := json.Unmarshal(body, &openAIReq); err != nil {
+		return nil, err
+	}
+
+	return &model.ProbedRequest{
+		RawRequest:    body,
+		InboundFormat: model.APIFormatOpenAIEmbedding,
+		Model:         openAIReq.Model,
+		RequestKind:   model.RequestKindEmbedding,
+	}, nil
+}
+
+func (i *EmbeddingInbound) Parse(ctx context.Context, body []byte) (*model.InternalLLMRequest, error) {
 	var openAIReq OpenAIEmbeddingRequest
 	if err := json.Unmarshal(body, &openAIReq); err != nil {
 		return nil, err

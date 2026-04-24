@@ -18,12 +18,27 @@ type PassthroughInbound struct {
 	rawStreamBytes []byte // collected by handleRawStream for post-stream usage extraction
 }
 
-func (i *PassthroughInbound) TransformRequest(ctx context.Context, body []byte) (*model.InternalLLMRequest, error) {
+func (i *PassthroughInbound) Probe(ctx context.Context, body []byte) (*model.ProbedRequest, error) {
 	var minimal struct {
 		Model  string `json:"model"`
 		Stream *bool  `json:"stream"`
 	}
 	// Best-effort parse: non-JSON bodies (multipart etc.) are allowed; model may be empty.
+	json.Unmarshal(body, &minimal) //nolint:errcheck
+	return &model.ProbedRequest{
+		RawRequest:    body,
+		InboundFormat: model.APIFormatPassthrough,
+		Model:         minimal.Model,
+		Stream:        minimal.Stream != nil && *minimal.Stream,
+		RequestKind:   model.RequestKindPassthrough,
+	}, nil
+}
+
+func (i *PassthroughInbound) Parse(ctx context.Context, body []byte) (*model.InternalLLMRequest, error) {
+	var minimal struct {
+		Model  string `json:"model"`
+		Stream *bool  `json:"stream"`
+	}
 	json.Unmarshal(body, &minimal) //nolint:errcheck
 	return &model.InternalLLMRequest{
 		Model:        minimal.Model,

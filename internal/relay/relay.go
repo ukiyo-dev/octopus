@@ -20,13 +20,14 @@ import (
 	"github.com/bestruirui/octopus/internal/transformer/outbound"
 	"github.com/bestruirui/octopus/internal/utils/log"
 	"github.com/gin-gonic/gin"
+	"github.com/samber/lo"
 	"github.com/tmaxmax/go-sse"
 )
 
 // Handler 处理入站请求并转发到上游服务
 func Handler(inboundType inbound.InboundType, c *gin.Context) {
 	// 解析请求
-	internalRequest, inAdapter, err := parseRequest(inboundType, c)
+	probedRequest, inAdapter, err := parseRequest(inboundType, c)
 	if err != nil {
 		return
 	}
@@ -34,14 +35,14 @@ func Handler(inboundType inbound.InboundType, c *gin.Context) {
 	if supportedModels != "" {
 		supportedModelsArray := strings.Split(supportedModels, ",")
 		if !slices.ContainsFunc(supportedModelsArray, func(m string) bool {
-			return strings.HasPrefix(internalRequest.Model, m)
+			return strings.HasPrefix(probedRequest.Model, m)
 		}) {
 			resp.Error(c, http.StatusBadRequest, "model not supported")
 			return
 		}
 	}
 
-	requestModel := internalRequest.Model
+	requestModel := probedRequest.Model
 	apiKeyID := c.GetInt("api_key_id")
 
 	// 获取通道分组
@@ -59,17 +60,17 @@ func Handler(inboundType inbound.InboundType, c *gin.Context) {
 	}
 
 	// 初始化 Metrics
-	metrics := NewRelayMetrics(apiKeyID, requestModel, internalRequest)
+	metrics := NewRelayMetrics(apiKeyID, requestModel, probedRequest)
 
 	// 请求级上下文
 	req := &relayRequest{
-		c:               c,
-		inAdapter:       inAdapter,
-		internalRequest: internalRequest,
-		metrics:         metrics,
-		apiKeyID:        apiKeyID,
-		requestModel:    requestModel,
-		iter:            iter,
+		c:             c,
+		inAdapter:     inAdapter,
+		probedRequest: probedRequest,
+		metrics:       metrics,
+		apiKeyID:      apiKeyID,
+		requestModel:  requestModel,
+		iter:          iter,
 	}
 
 	var lastErr error
@@ -117,17 +118,18 @@ func Handler(inboundType inbound.InboundType, c *gin.Context) {
 		}
 
 		// 类型兼容性检查
-		if internalRequest.IsEmbeddingRequest() && !outbound.IsEmbeddingChannelType(channel.Type) {
+		if probedRequest.RequestKind == model.RequestKindEmbedding && !outbound.IsEmbeddingChannelType(channel.Type) {
 			iter.Skip(channel.ID, usedKey.ID, channel.Name, "channel type not compatible with embedding request")
 			continue
 		}
-		if internalRequest.IsChatRequest() && !outbound.IsChatChannelType(channel.Type) {
+		if probedRequest.RequestKind == model.RequestKindChat && !outbound.IsChatChannelType(channel.Type) {
 			iter.Skip(channel.ID, usedKey.ID, channel.Name, "channel type not compatible with chat request")
 			continue
 		}
-
-		// 设置实际模型
-		internalRequest.Model = item.ModelName
+		if probedRequest.RequestKind == model.RequestKindPassthrough && !isPassthroughChannelType(channel.Type) {
+			iter.Skip(channel.ID, usedKey.ID, channel.Name, "channel type not compatible with passthrough request")
+			continue
+		}
 
 		log.Infof("request model %s, mode: %d, forwarding to channel: %s model: %s (attempt %d/%d, sticky=%t)",
 			requestModel, group.Mode, channel.Name, item.ModelName,
@@ -172,7 +174,7 @@ func (ra *relayAttempt) attempt() attemptResult {
 
 	if fwdErr == nil {
 		// ====== 成功 ======
-		ra.collectResponse()
+		ra.collectResponse(model.ResponseStatusComplete)
 		ra.usedKey.TotalCost += ra.metrics.Stats.InputCost + ra.metrics.Stats.OutputCost
 		op.ChannelKeyUpdate(ra.usedKey)
 
@@ -185,7 +187,7 @@ func (ra *relayAttempt) attempt() attemptResult {
 		})
 
 		// 熔断器：记录成功
-		balancer.RecordSuccess(ra.channel.ID, ra.usedKey.ID, ra.internalRequest.Model)
+		balancer.RecordSuccess(ra.channel.ID, ra.usedKey.ID, ra.attemptModel())
 		// 会话保持：更新粘性记录
 		balancer.SetSticky(ra.apiKeyID, ra.requestModel, ra.channel.ID, ra.usedKey.ID)
 
@@ -203,11 +205,11 @@ func (ra *relayAttempt) attempt() attemptResult {
 	})
 
 	// 熔断器：记录失败
-	balancer.RecordFailure(ra.channel.ID, ra.usedKey.ID, ra.internalRequest.Model)
+	balancer.RecordFailure(ra.channel.ID, ra.usedKey.ID, ra.attemptModel())
 
 	written := ra.c.Writer.Written()
 	if written {
-		ra.collectResponse()
+		ra.collectResponse(model.ResponseStatusPartial)
 	}
 	return attemptResult{
 		Success: false,
@@ -217,7 +219,7 @@ func (ra *relayAttempt) attempt() attemptResult {
 }
 
 // parseRequest 解析并验证入站请求
-func parseRequest(inboundType inbound.InboundType, c *gin.Context) (*model.InternalLLMRequest, model.Inbound, error) {
+func parseRequest(inboundType inbound.InboundType, c *gin.Context) (*model.ProbedRequest, model.Inbound, error) {
 	body, err := io.ReadAll(c.Request.Body)
 	if err != nil {
 		resp.Error(c, http.StatusInternalServerError, err.Error())
@@ -225,33 +227,99 @@ func parseRequest(inboundType inbound.InboundType, c *gin.Context) (*model.Inter
 	}
 
 	inAdapter := inbound.Get(inboundType)
-	internalRequest, err := inAdapter.TransformRequest(c.Request.Context(), body)
+	ctx := model.WithRequestPath(c.Request.Context(), c.Request.URL.Path)
+	probedRequest, err := inAdapter.Probe(ctx, body)
 	if err != nil {
 		resp.Error(c, http.StatusInternalServerError, err.Error())
 		return nil, nil, err
 	}
 
 	// Pass through the original query parameters
-	internalRequest.Query = c.Request.URL.Query()
+	probedRequest.Query = c.Request.URL.Query()
 	// Store path suffix (after /v1) for URL passthrough in same-protocol relay
-	internalRequest.RawPath = strings.TrimPrefix(c.Request.URL.Path, "/v1")
+	probedRequest.RawPath = strings.TrimPrefix(c.Request.URL.Path, "/v1")
 
-	if err := internalRequest.Validate(); err != nil {
+	if probedRequest.Model == "" {
+		err = fmt.Errorf("model is required")
 		resp.Error(c, http.StatusForbidden, err.Error())
 		return nil, nil, err
 	}
 
-	return internalRequest, inAdapter, nil
+	return probedRequest, inAdapter, nil
+}
+
+func isPassthroughChannelType(channelType outbound.OutboundType) bool {
+	switch channelType {
+	case outbound.OutboundTypeOpenAIChat, outbound.OutboundTypeOpenAIResponse, outbound.OutboundTypeOpenAIEmbedding:
+		return true
+	default:
+		return false
+	}
+}
+
+func (ra *relayAttempt) buildInternalRequest(ctx context.Context) (*model.InternalLLMRequest, error) {
+	targetFormat := ra.outAdapter.TargetFormat()
+	targetModel := ra.iter.Item().ModelName
+	probed := ra.probedRequest
+
+	if probed.RequestKind == model.RequestKindPassthrough || probed.InboundFormat == targetFormat {
+		req := &model.InternalLLMRequest{
+			Model:        targetModel,
+			RawRequest:   probed.RawRequest,
+			RawAPIFormat: probed.InboundFormat,
+			Query:        probed.Query,
+			RawPath:      probed.RawPath,
+		}
+		if probed.Stream {
+			req.Stream = lo.ToPtr(true)
+		}
+		if probed.RequestKind == model.RequestKindPassthrough {
+			req.RawAPIFormat = model.APIFormatPassthrough
+		}
+		return req, nil
+	}
+
+	requestPath := probed.RawPath
+	if ra.c != nil && ra.c.Request != nil {
+		requestPath = ra.c.Request.URL.Path
+	}
+	req, err := ra.inAdapter.Parse(model.WithRequestPath(ctx, requestPath), probed.RawRequest)
+	if err != nil {
+		return nil, err
+	}
+	req.Model = targetModel
+	req.Query = probed.Query
+	req.RawPath = probed.RawPath
+	if req.Stream == nil && probed.Stream {
+		req.Stream = lo.ToPtr(true)
+	}
+	if err := req.Validate(); err != nil {
+		return nil, err
+	}
+	return req, nil
+}
+
+func (ra *relayAttempt) attemptModel() string {
+	if ra.internalRequest != nil && ra.internalRequest.Model != "" {
+		return ra.internalRequest.Model
+	}
+	return ra.iter.Item().ModelName
 }
 
 // forward 转发请求到上游服务
 func (ra *relayAttempt) forward() (int, error) {
 	ctx := ra.c.Request.Context()
 
+	internalRequest, err := ra.buildInternalRequest(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("failed to build internal request: %w", err)
+	}
+	ra.internalRequest = internalRequest
+
 	// 构建出站请求
 	outboundRequest, err := ra.outAdapter.TransformRequest(
 		ctx,
-		ra.internalRequest,
+		internalRequest,
 		ra.channel.GetBaseUrl(),
 		ra.usedKey.ChannelKey,
 	)
@@ -281,7 +349,7 @@ func (ra *relayAttempt) forward() (int, error) {
 
 	// 处理响应
 	isSSE := strings.Contains(strings.ToLower(response.Header.Get("Content-Type")), "text/event-stream")
-	if (ra.internalRequest.Stream != nil && *ra.internalRequest.Stream) || isSSE {
+	if ra.probedRequest.Stream || isSSE {
 		if collector, ok := ra.inAdapter.(rawStreamCollector); ok {
 			if err := ra.handleRawStream(ctx, response, collector); err != nil {
 				return 0, err
@@ -391,7 +459,7 @@ func (ra *relayAttempt) handleRawStream(ctx context.Context, response *http.Resp
 		case <-ctx.Done():
 			log.Infof("client disconnected, stopping raw stream")
 			collector.CollectRawStream(buf.Bytes())
-			return nil
+			return ctx.Err()
 		case <-firstTokenC:
 			log.Warnf("first token timeout (%ds), switching channel", ra.firstTokenTimeOutSec)
 			_ = response.Body.Close()
@@ -476,7 +544,7 @@ func (ra *relayAttempt) handleStreamResponse(ctx context.Context, response *http
 		select {
 		case <-ctx.Done():
 			log.Infof("client disconnected, stopping stream")
-			return nil
+			return ctx.Err()
 		case <-firstTokenC:
 			log.Warnf("first token timeout (%ds), switching channel", ra.firstTokenTimeOutSec)
 			_ = response.Body.Close()
@@ -492,7 +560,10 @@ func (ra *relayAttempt) handleStreamResponse(ctx context.Context, response *http
 			}
 
 			data, err := ra.transformStreamData(ctx, r.data)
-			if err != nil || len(data) == 0 {
+			if err != nil {
+				return err
+			}
+			if len(data) == 0 {
 				continue
 			}
 			if firstToken {
@@ -555,11 +626,14 @@ func (ra *relayAttempt) handleResponse(ctx context.Context, response *http.Respo
 }
 
 // collectResponse 收集响应信息
-func (ra *relayAttempt) collectResponse() {
+func (ra *relayAttempt) collectResponse(status model.ResponseStatus) {
 	internalResponse, err := ra.inAdapter.GetInternalResponse(ra.c.Request.Context())
 	if err != nil || internalResponse == nil {
 		return
 	}
+	if internalResponse.ResponseStatus == "" {
+		internalResponse.ResponseStatus = status
+	}
 
-	ra.metrics.SetInternalResponse(internalResponse, ra.internalRequest.Model)
+	ra.metrics.SetInternalResponse(internalResponse, ra.attemptModel())
 }

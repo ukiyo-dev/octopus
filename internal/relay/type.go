@@ -54,13 +54,13 @@ var hopByHopHeaders = map[string]bool{
 }
 
 type relayRequest struct {
-	c               *gin.Context
-	inAdapter       model.Inbound
-	internalRequest *model.InternalLLMRequest
-	metrics         *RelayMetrics
-	apiKeyID        int
-	requestModel    string
-	iter            *balancer.Iterator
+	c             *gin.Context
+	inAdapter     model.Inbound
+	probedRequest *model.ProbedRequest
+	metrics       *RelayMetrics
+	apiKeyID      int
+	requestModel  string
+	iter          *balancer.Iterator
 }
 
 // relayAttempt 尝试级上下文
@@ -71,6 +71,7 @@ type relayAttempt struct {
 	channel              *dbmodel.Channel
 	usedKey              dbmodel.ChannelKey
 	firstTokenTimeOutSec int
+	internalRequest      *model.InternalLLMRequest
 }
 
 // attemptResult 封装单次尝试的结果

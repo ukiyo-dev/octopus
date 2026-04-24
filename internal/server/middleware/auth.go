@@ -34,7 +34,10 @@ func APIKeyAuth() gin.HandlerFunc {
 		var apiKey string
 		var requestType string
 
-		if key := c.Request.Header.Get("x-api-key"); key != "" {
+		if key := c.Request.Header.Get("x-goog-api-key"); key != "" {
+			apiKey = key
+			requestType = "gemini"
+		} else if key := c.Request.Header.Get("x-api-key"); key != "" {
 			apiKey = key
 			requestType = "anthropic"
 		} else if auth := c.Request.Header.Get("Authorization"); auth != "" {

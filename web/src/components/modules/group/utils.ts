@@ -20,17 +20,11 @@ export function memberKey(member: Pick<LLMChannel, 'channel_id' | 'name'>) {
     return modelChannelKey(member.channel_id, member.name);
 }
 
-export function matchesGroupName(modelName: string, groupKey: string) {
-    if (!groupKey) return false;
-    return modelName.toLowerCase().includes(groupKey);
-}
-
 export function buildChannelNameByModelKey(modelChannels: LLMChannel[]) {
-    const map = new Map<string, string>();
-    modelChannels.forEach((mc) => {
+	const map = new Map<string, string>();
+	modelChannels.forEach((mc) => {
         map.set(modelChannelKey(mc.channel_id, mc.name), mc.channel_name);
     });
     return map;
 }
-
 

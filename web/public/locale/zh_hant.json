@@ -369,7 +369,7 @@
         "form": {
             "name": "分組名稱",
             "matchRegex": "匹配正規",
-            "matchRegexPlaceholder": "留空則預設按分組名稱模糊比對",
+            "matchRegexPlaceholder": "留空則按分組名稱精確匹配",
             "matchRegexInvalid": "正規無效",
             "firstTokenTimeOut": "首字逾時",
             "firstTokenTimeOutHint": "單位秒，僅串流響應起效，0 表示不限制",
@@ -536,7 +536,6 @@
             "typeOpenAIEmbedding": "OpenAI Embedding",
             "typeAnthropic": "Anthropic",
             "typeGemini": "Gemini",
-            "typeVolcengine": "火山引擎",
             "autoSync": "自動同步",
             "autoGroup": "自動分組",
             "autoGroupNone": "不自動分組",

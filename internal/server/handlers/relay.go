@@ -18,6 +18,13 @@ func init() {
 			router.NewRoute("/*path", http.MethodPost).
 				Handle(dispatch),
 		)
+	router.NewGroupRouter("/v1beta").
+		Use(middleware.APIKeyAuth()).
+		Use(middleware.RequireJSON()).
+		AddRoute(
+			router.NewRoute("/models/*path", http.MethodPost).
+				Handle(dispatchGemini),
+		)
 }
 
 // dispatch routes requests based on path, falling back to passthrough for unknown endpoints.
@@ -36,3 +43,6 @@ func dispatch(c *gin.Context) {
 	}
 }
 
+func dispatchGemini(c *gin.Context) {
+	relay.Handler(inbound.InboundTypeGemini, c)
+}

@@ -52,6 +52,12 @@ func init() {
 			router.NewRoute("/models", http.MethodGet).
 				Handle(getModelList),
 		)
+	router.NewGroupRouter("/v1beta").
+		Use(middleware.APIKeyAuth()).
+		AddRoute(
+			router.NewRoute("/models", http.MethodGet).
+				Handle(getModelList),
+		)
 }
 
 func getModelList(c *gin.Context) {
@@ -75,7 +81,20 @@ func getModelList(c *gin.Context) {
 		})
 	}
 
-	if c.GetString("request_type") == "anthropic" {
+	switch c.GetString("request_type") {
+	case "gemini":
+		var geminiModels []model.GeminiModel
+		for _, m := range models {
+			geminiModels = append(geminiModels, model.GeminiModel{
+				Name:        "models/" + m,
+				DisplayName: m,
+				Description: m,
+			})
+		}
+		c.JSON(200, model.GeminiModelList{
+			Models: geminiModels,
+		})
+	case "anthropic":
 		var anthropicModels []model.AnthropicModel
 		for _, m := range models {
 			anthropicModels = append(anthropicModels, model.AnthropicModel{
@@ -94,7 +113,7 @@ func getModelList(c *gin.Context) {
 			response["last_id"] = anthropicModels[len(anthropicModels)-1].ID
 		}
 		c.JSON(200, response)
-	} else {
+	default:
 		var openAIModels []model.OpenAIModel
 		for _, m := range models {
 			openAIModels = append(openAIModels, model.OpenAIModel{

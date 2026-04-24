@@ -24,7 +24,7 @@ type RelayMetrics struct {
 	FirstTokenTime time.Time
 
 	// 请求和响应内容
-	InternalRequest  *transformerModel.InternalLLMRequest
+	ProbedRequest    *transformerModel.ProbedRequest
 	InternalResponse *transformerModel.InternalLLMResponse
 
 	// 统计指标
@@ -32,12 +32,12 @@ type RelayMetrics struct {
 	Stats       model.StatsMetrics
 }
 
-func NewRelayMetrics(apiKeyID int, requestModel string, req *transformerModel.InternalLLMRequest) *RelayMetrics {
+func NewRelayMetrics(apiKeyID int, requestModel string, req *transformerModel.ProbedRequest) *RelayMetrics {
 	return &RelayMetrics{
-		APIKeyID:        apiKeyID,
-		RequestModel:    requestModel,
-		StartTime:       time.Now(),
-		InternalRequest: req,
+		APIKeyID:      apiKeyID,
+		RequestModel:  requestModel,
+		StartTime:     time.Now(),
+		ProbedRequest: req,
 	}
 }
 
@@ -158,16 +158,15 @@ func (m *RelayMetrics) saveLog(ctx context.Context, err error, duration time.Dur
 	}
 
 	// 请求内容
-	if m.InternalRequest != nil {
-		if len(m.InternalRequest.RawRequest) > 0 {
-			relayLog.RequestContent = string(m.InternalRequest.RawRequest)
-		} else if reqJSON, jsonErr := json.Marshal(m.InternalRequest); jsonErr == nil {
-			relayLog.RequestContent = string(reqJSON)
-		}
+	if m.ProbedRequest != nil && len(m.ProbedRequest.RawRequest) > 0 {
+		relayLog.RequestContent = string(m.ProbedRequest.RawRequest)
 	}
 
 	// 响应内容
 	if m.InternalResponse != nil {
+		if m.InternalResponse.ResponseStatus != "" {
+			relayLog.ResponseStatus = string(m.InternalResponse.ResponseStatus)
+		}
 		if len(m.InternalResponse.RawResponse) > 0 {
 			relayLog.ResponseContent = string(m.InternalResponse.RawResponse)
 		} else {

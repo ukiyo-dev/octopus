@@ -371,13 +371,12 @@ type HighlightItemProps<T extends React.ElementType = 'div'> =
     value?: string;
     className?: string;
     style?: React.CSSProperties;
-    transition?: Transition;
-    activeClassName?: string;
-    disabled?: boolean;
-    exitDelay?: number;
-    asChild?: boolean;
-    forceUpdateBounds?: boolean;
-  };
+  transition?: Transition;
+  activeClassName?: string;
+  disabled?: boolean;
+  asChild?: boolean;
+  forceUpdateBounds?: boolean;
+};
 
 function HighlightItem<T extends React.ElementType>({
   ref,
@@ -390,7 +389,6 @@ function HighlightItem<T extends React.ElementType>({
   transition,
   disabled = false,
   activeClassName,
-  exitDelay,
   asChild = false,
   forceUpdateBounds,
   ...props
@@ -410,7 +408,6 @@ function HighlightItem<T extends React.ElementType>({
     transition: contextTransition,
     id: contextId,
     disabled: contextDisabled,
-    exitDelay: contextExitDelay,
     forceUpdateBounds: contextForceUpdateBounds,
     setActiveClassName,
   } = useHighlight();

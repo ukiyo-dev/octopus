@@ -90,14 +90,6 @@ type ChannelKeyUpdateRequest struct {
 	Remark     *string `json:"remark,omitempty"`
 }
 
-// ChannelFetchModelRequest is used by /channel/fetch-model (not persisted).
-type ChannelFetchModelRequest struct {
-	Type    outbound.OutboundType `json:"type" binding:"required"`
-	BaseURL string                `json:"base_url" binding:"required"`
-	Key     string                `json:"key" binding:"required"`
-	Proxy   bool                  `json:"proxy"`
-}
-
 func (c *Channel) GetBaseUrl() string {
 	if c == nil || len(c.BaseUrls) == 0 {
 		return ""
