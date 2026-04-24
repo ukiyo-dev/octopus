@@ -50,6 +50,7 @@ func (i *MessagesInbound) TransformRequest(ctx context.Context, body []byte) (*m
 		Metadata:            map[string]string{},
 		RawAPIFormat:        model.APIFormatAnthropicMessage,
 		TransformerMetadata: map[string]string{},
+		RawRequest:          body,
 	}
 	if anthropicReq.Metadata != nil {
 		chatReq.Metadata["user_id"] = anthropicReq.Metadata.UserID
@@ -317,6 +318,11 @@ func (i *MessagesInbound) TransformResponse(ctx context.Context, response *model
 	// Store the response for later retrieval
 	i.storedResponse = response
 
+	// Passthrough: upstream speaks Anthropic format, forward raw bytes directly
+	if response.RawResponseFormat == model.APIFormatAnthropicMessage && len(response.RawResponse) > 0 {
+		return response.RawResponse, nil
+	}
+
 	resp := &Message{
 		ID:    response.ID,
 		Type:  "message",
@@ -466,6 +472,18 @@ func (i *MessagesInbound) TransformStream(ctx context.Context, stream *model.Int
 
 	// Store the chunk for aggregation
 	i.streamChunks = append(i.streamChunks, stream)
+
+	// Passthrough: upstream speaks Anthropic format — reconstruct SSE event from raw bytes.
+	// Anthropic SSE data JSON always contains a "type" field that mirrors the event: header.
+	if stream.RawResponseFormat == model.APIFormatAnthropicMessage && len(stream.RawResponse) > 0 {
+		var typeHint struct {
+			Type string `json:"type"`
+		}
+		if err := json.Unmarshal(stream.RawResponse, &typeHint); err == nil && typeHint.Type != "" {
+			return formatSSEEvent(typeHint.Type, stream.RawResponse), nil
+		}
+		return nil, nil
+	}
 
 	var events [][]byte
 
@@ -878,6 +896,11 @@ func (i *MessagesInbound) GetInternalResponse(ctx context.Context) (*model.Inter
 		return nil, nil
 	}
 
+	// Passthrough: chunks carry raw Anthropic SSE bytes — extract usage/id/model from them.
+	if i.streamChunks[0].RawResponseFormat == model.APIFormatAnthropicMessage {
+		return i.extractPassthroughResponse()
+	}
+
 	// Use the first chunk as the base
 	firstChunk := i.streamChunks[0]
 	result := &model.InternalLLMResponse{
@@ -978,6 +1001,78 @@ func (i *MessagesInbound) GetInternalResponse(ctx context.Context) (*model.Inter
 	// Clear stored chunks after aggregation
 	i.streamChunks = nil
 
+	// Marshal aggregated result as RawResponse for logging
+	if raw, err := json.Marshal(result); err == nil {
+		result.RawResponse = raw
+	}
+
+	return result, nil
+}
+
+// extractPassthroughResponse builds a metrics-ready InternalLLMResponse from raw
+// Anthropic SSE chunks (passthrough mode) by scanning for message_start (input tokens)
+// and message_delta (output tokens / stop reason) events.
+func (i *MessagesInbound) extractPassthroughResponse() (*model.InternalLLMResponse, error) {
+	result := &model.InternalLLMResponse{Object: "chat.completion"}
+
+	var inputTokens, outputTokens, cacheRead, cacheCreate int64
+
+	for _, chunk := range i.streamChunks {
+		if chunk.ID != "" {
+			result.ID = chunk.ID
+		}
+		if chunk.Model != "" {
+			result.Model = chunk.Model
+		}
+
+		if len(chunk.RawResponse) == 0 {
+			continue
+		}
+
+		var ev StreamEvent
+		if err := json.Unmarshal(chunk.RawResponse, &ev); err != nil {
+			continue
+		}
+
+		switch ev.Type {
+		case "message_start":
+			if ev.Message != nil {
+				if result.ID == "" {
+					result.ID = ev.Message.ID
+				}
+				if result.Model == "" {
+					result.Model = ev.Message.Model
+				}
+				if ev.Message.Usage != nil {
+					inputTokens = ev.Message.Usage.InputTokens
+					cacheRead = ev.Message.Usage.CacheReadInputTokens
+					cacheCreate = ev.Message.Usage.CacheCreationInputTokens
+				}
+			}
+		case "message_delta":
+			if ev.Usage != nil {
+				outputTokens = ev.Usage.OutputTokens
+			}
+		}
+	}
+
+	if inputTokens > 0 || outputTokens > 0 {
+		usage := &model.Usage{
+			PromptTokens:             inputTokens,
+			CompletionTokens:         outputTokens,
+			TotalTokens:              inputTokens + outputTokens + cacheRead + cacheCreate,
+			CacheCreationInputTokens: cacheCreate,
+			AnthropicUsage:           true,
+		}
+		if cacheRead > 0 {
+			usage.PromptTokensDetails = &model.PromptTokensDetails{
+				CachedTokens: cacheRead,
+			}
+		}
+		result.Usage = usage
+	}
+
+	i.streamChunks = nil
 	return result, nil
 }
 

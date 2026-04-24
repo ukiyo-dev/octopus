@@ -25,6 +25,9 @@ type MessageOutbound struct {
 	toolIndex   int
 	toolCalls   map[int]*model.ToolCall
 	initialized bool
+	// passthrough is true when the inbound request is already in Anthropic format,
+	// so raw bytes can be forwarded without protocol conversion.
+	passthrough bool
 }
 
 func (o *MessageOutbound) TransformRequest(ctx context.Context, request *model.InternalLLMRequest, baseUrl, key string) (*http.Request, error) {
@@ -32,12 +35,18 @@ func (o *MessageOutbound) TransformRequest(ctx context.Context, request *model.I
 		return nil, fmt.Errorf("request is nil")
 	}
 
-	// Convert to Anthropic request format
-	anthropicReq := convertToAnthropicRequest(request)
+	o.passthrough = request.RawAPIFormat == model.APIFormatAnthropicMessage
 
-	body, err := json.Marshal(anthropicReq)
-	if err != nil {
-		return nil, fmt.Errorf("failed to marshal anthropic request: %w", err)
+	var body []byte
+	if o.passthrough && len(request.RawRequest) > 0 {
+		body = patchAnthropicRequest(request.RawRequest, request.Model)
+	} else {
+		anthropicReq := convertToAnthropicRequest(request)
+		var merr error
+		body, merr = json.Marshal(anthropicReq)
+		if merr != nil {
+			return nil, fmt.Errorf("failed to marshal anthropic request: %w", merr)
+		}
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "", bytes.NewReader(body))
@@ -62,7 +71,11 @@ func (o *MessageOutbound) TransformRequest(ctx context.Context, request *model.I
 		return nil, fmt.Errorf("failed to parse base url: %w", err)
 	}
 
-	parsedUrl.Path = parsedUrl.Path + "/messages"
+	if o.passthrough && request.RawPath != "" {
+		parsedUrl.Path = parsedUrl.Path + request.RawPath
+	} else {
+		parsedUrl.Path = parsedUrl.Path + "/messages"
+	}
 	// Pass through the original query parameters exactly as-is
 	if request.Query != nil {
 		parsedUrl.RawQuery = request.Query.Encode()
@@ -107,7 +120,10 @@ func (o *MessageOutbound) TransformResponse(ctx context.Context, response *http.
 	}
 
 	// Convert to internal response
-	return convertToLLMResponse(&anthropicResp), nil
+	result := convertToLLMResponse(&anthropicResp)
+	result.RawResponse = body
+	result.RawResponseFormat = model.APIFormatAnthropicMessage
+	return result, nil
 }
 
 func (o *MessageOutbound) TransformStream(ctx context.Context, eventData []byte) (*model.InternalLLMResponse, error) {
@@ -120,6 +136,32 @@ func (o *MessageOutbound) TransformStream(ctx context.Context, eventData []byte)
 		return &model.InternalLLMResponse{
 			Object: "[DONE]",
 		}, nil
+	}
+
+	// Passthrough mode: forward all Anthropic SSE events as raw bytes so the inbound
+	// can reconstruct the original event:type\ndata:...\n\n format for the client.
+	if o.passthrough {
+		resp := &model.InternalLLMResponse{
+			ID:                o.streamID,
+			Model:             o.streamModel,
+			Object:            "chat.completion.chunk",
+			RawResponse:       eventData,
+			RawResponseFormat: model.APIFormatAnthropicMessage,
+		}
+		var ev struct {
+			Type    string `json:"type"`
+			Message *struct {
+				ID    string `json:"id"`
+				Model string `json:"model"`
+			} `json:"message,omitempty"`
+		}
+		if json.Unmarshal(eventData, &ev) == nil && ev.Type == "message_start" && ev.Message != nil {
+			o.streamID = ev.Message.ID
+			o.streamModel = ev.Message.Model
+			resp.ID = o.streamID
+			resp.Model = o.streamModel
+		}
+		return resp, nil
 	}
 
 	// Initialize state if needed
@@ -894,4 +936,21 @@ func convertAnthropicUsage(usage *anthropicModel.Usage) *model.Usage {
 		}
 	}
 	return result
+}
+
+// patchAnthropicRequest replaces the model field in a raw Anthropic request body.
+func patchAnthropicRequest(rawBody []byte, modelName string) []byte {
+	if len(rawBody) == 0 {
+		return rawBody
+	}
+	var m map[string]interface{}
+	if err := json.Unmarshal(rawBody, &m); err != nil {
+		return rawBody
+	}
+	m["model"] = modelName
+	patched, err := json.Marshal(m)
+	if err != nil {
+		return rawBody
+	}
+	return patched
 }
