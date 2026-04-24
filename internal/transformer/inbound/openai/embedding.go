@@ -46,21 +46,25 @@ func (i *EmbeddingInbound) TransformRequest(ctx context.Context, body []byte) (*
 	request.EmbeddingEncodingFormat = openAIReq.EncodingFormat
 	request.User = openAIReq.User
 	request.RawAPIFormat = model.APIFormatOpenAIEmbedding
+	request.RawRequest = body
 
 	return &request, nil
 }
 
 func (i *EmbeddingInbound) TransformResponse(ctx context.Context, response *model.InternalLLMResponse) ([]byte, error) {
-	// Store the response for later retrieval
 	i.storedResponse = response
 
-	// 转换为 OpenAI 标准格式
+	// Passthrough: upstream format matches client format, return raw bytes directly
+	if response.RawResponseFormat == model.APIFormatOpenAIEmbedding && len(response.RawResponse) > 0 {
+		return response.RawResponse, nil
+	}
+
 	openAIResp := OpenAIEmbeddingResponse{
 		ID:      response.ID,
 		Object:  response.Object,
 		Created: response.Created,
 		Model:   response.Model,
-		Data:    response.EmbeddingData, // 使用 "data" 返回给客户端
+		Data:    response.EmbeddingData,
 		Usage:   response.Usage,
 	}
 

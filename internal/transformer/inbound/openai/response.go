@@ -49,6 +49,8 @@ type ResponseInbound struct {
 	streamChunks []*model.InternalLLMResponse
 	// storedResponse stores the non-stream response
 	storedResponse *model.InternalLLMResponse
+	// completedEventResponse stores the raw "response" JSON from response.completed (passthrough mode)
+	completedEventResponse []byte
 }
 
 func (i *ResponseInbound) TransformRequest(ctx context.Context, body []byte) (*model.InternalLLMRequest, error) {
@@ -61,7 +63,12 @@ func (i *ResponseInbound) TransformRequest(ctx context.Context, body []byte) (*m
 		return nil, fmt.Errorf("model is required")
 	}
 
-	return convertToInternalRequest(&req)
+	internal, err := convertToInternalRequest(&req)
+	if err != nil {
+		return nil, err
+	}
+	internal.RawRequest = body
+	return internal, nil
 }
 
 func (i *ResponseInbound) TransformResponse(ctx context.Context, response *model.InternalLLMResponse) ([]byte, error) {
@@ -69,17 +76,18 @@ func (i *ResponseInbound) TransformResponse(ctx context.Context, response *model
 		return nil, fmt.Errorf("response is nil")
 	}
 
-	// Store the response for later retrieval
 	i.storedResponse = response
 
-	// Convert to Responses API format
-	resp := convertToResponsesAPIResponse(response)
+	// Passthrough: upstream format matches client format, return raw bytes directly
+	if response.RawResponseFormat == model.APIFormatOpenAIResponse && len(response.RawResponse) > 0 {
+		return response.RawResponse, nil
+	}
 
+	resp := convertToResponsesAPIResponse(response)
 	body, err := json.Marshal(resp)
 	if err != nil {
 		return nil, fmt.Errorf("failed to marshal responses api response: %w", err)
 	}
-
 	return body, nil
 }
 
@@ -89,19 +97,10 @@ func (i *ResponseInbound) TransformStream(ctx context.Context, stream *model.Int
 		return []byte("data: [DONE]\n\n"), nil
 	}
 
-	// Store the chunk for aggregation
+	// Store the chunk for aggregation (needed for metrics regardless of passthrough)
 	i.streamChunks = append(i.streamChunks, stream)
 
-	var events [][]byte
-
-	// Initialize tool call tracking maps if needed
-	if i.toolCalls == nil {
-		i.toolCalls = make(map[int]*model.ToolCall)
-		i.toolCallItemStarted = make(map[int]bool)
-		i.toolCallOutputIndex = make(map[int]int)
-	}
-
-	// Update metadata from chunk
+	// Always update metadata from chunk, regardless of passthrough
 	if i.responseID == "" && stream.ID != "" {
 		i.responseID = stream.ID
 	}
@@ -113,6 +112,53 @@ func (i *ResponseInbound) TransformStream(ctx context.Context, stream *model.Int
 	}
 	if stream.Usage != nil {
 		i.usage = stream.Usage
+	}
+	// Accumulate text/reasoning for logging.
+	// If Choices are populated (non-passthrough outbound), use them directly.
+	// If raw bytes are present (passthrough outbound), parse the event ourselves.
+	if len(stream.Choices) > 0 {
+		for _, choice := range stream.Choices {
+			if choice.Delta != nil {
+				if choice.Delta.Content.Content != nil && *choice.Delta.Content.Content != "" {
+					i.accumulatedText.WriteString(*choice.Delta.Content.Content)
+				}
+				if choice.Delta.ReasoningContent != nil && *choice.Delta.ReasoningContent != "" {
+					i.accumulatedReasoning.WriteString(*choice.Delta.ReasoningContent)
+				}
+			}
+		}
+	} else if len(stream.RawResponse) > 0 {
+		var ev struct {
+			Type     string          `json:"type"`
+			Delta    string          `json:"delta"`
+			Response json.RawMessage `json:"response"`
+		}
+		if err := json.Unmarshal(stream.RawResponse, &ev); err == nil {
+			switch ev.Type {
+			case "response.output_text.delta":
+				i.accumulatedText.WriteString(ev.Delta)
+			case "response.reasoning_summary_text.delta":
+				i.accumulatedReasoning.WriteString(ev.Delta)
+			case "response.completed":
+				if len(ev.Response) > 0 {
+					i.completedEventResponse = ev.Response
+				}
+			}
+		}
+	}
+
+	// Passthrough: upstream format matches client format, forward raw bytes directly
+	if stream.RawResponseFormat == model.APIFormatOpenAIResponse && len(stream.RawResponse) > 0 {
+		return []byte("data: " + string(stream.RawResponse) + "\n\n"), nil
+	}
+
+	var events [][]byte
+
+	// Initialize tool call tracking maps if needed
+	if i.toolCalls == nil {
+		i.toolCalls = make(map[int]*model.ToolCall)
+		i.toolCallItemStarted = make(map[int]bool)
+		i.toolCallOutputIndex = make(map[int]int)
 	}
 
 	// Generate response.created event if first chunk
@@ -577,7 +623,7 @@ func (i *ResponseInbound) closeCurrentOutputItem() [][]byte {
 }
 
 // GetInternalResponse returns the complete internal response for logging, statistics, etc.
-// For streaming: aggregates all stored stream chunks into a complete response
+// For streaming: builds response from accumulated state (same source as client output)
 // For non-streaming: returns the stored response
 func (i *ResponseInbound) GetInternalResponse(ctx context.Context) (*model.InternalLLMResponse, error) {
 	// Return stored response for non-stream scenario
@@ -585,111 +631,104 @@ func (i *ResponseInbound) GetInternalResponse(ctx context.Context) (*model.Inter
 		return i.storedResponse, nil
 	}
 
-	// Aggregate stream chunks for stream scenario
 	if len(i.streamChunks) == 0 {
 		return nil, nil
 	}
 
-	// Use the first chunk as the base
-	firstChunk := i.streamChunks[0]
 	result := &model.InternalLLMResponse{
-		ID:                firstChunk.ID,
-		Object:            "chat.completion",
-		Created:           firstChunk.Created,
-		Model:             firstChunk.Model,
-		SystemFingerprint: firstChunk.SystemFingerprint,
-		ServiceTier:       firstChunk.ServiceTier,
+		ID:    i.responseID,
+		Model: i.model,
+		Usage: i.usage,
 	}
 
-	// Aggregate choices by index
-	choicesMap := make(map[int]*model.Choice)
+	text := i.accumulatedText.String()
+	reasoning := i.accumulatedReasoning.String()
 
-	for _, chunk := range i.streamChunks {
-		// Update ID and Model if they appear in later chunks
-		if chunk.ID != "" {
-			result.ID = chunk.ID
-		}
-		if chunk.Model != "" {
-			result.Model = chunk.Model
-		}
-
-		// Capture usage from the last chunk that has it
-		if chunk.Usage != nil {
-			result.Usage = chunk.Usage
-		}
-
-		for _, choice := range chunk.Choices {
-			existingChoice, exists := choicesMap[choice.Index]
-			if !exists {
-				existingChoice = &model.Choice{
-					Index:   choice.Index,
-					Message: &model.Message{},
-				}
-				choicesMap[choice.Index] = existingChoice
-			}
-
-			// Aggregate delta content into message
-			if choice.Delta != nil {
-				delta := choice.Delta
-
-				// Set role if present
-				if delta.Role != "" {
-					existingChoice.Message.Role = delta.Role
-				}
-
-				// Append content
-				if delta.Content.Content != nil {
-					if existingChoice.Message.Content.Content == nil {
-						existingChoice.Message.Content.Content = new(string)
-					}
-					*existingChoice.Message.Content.Content += *delta.Content.Content
-				}
-
-				// Append reasoning content
-				if delta.ReasoningContent != nil {
-					if existingChoice.Message.ReasoningContent == nil {
-						existingChoice.Message.ReasoningContent = new(string)
-					}
-					*existingChoice.Message.ReasoningContent += *delta.ReasoningContent
-				}
-
-				// Aggregate tool calls
-				for _, toolCall := range delta.ToolCalls {
-					existingChoice.Message.ToolCalls = mergeToolCall(existingChoice.Message.ToolCalls, toolCall)
-				}
-
-				// Set refusal if present
-				if delta.Refusal != "" {
-					existingChoice.Message.Refusal = delta.Refusal
-				}
-			}
-
-			// Capture finish reason
-			if choice.FinishReason != nil {
-				existingChoice.FinishReason = choice.FinishReason
-			}
-
-			// Capture logprobs
-			if choice.Logprobs != nil {
-				if existingChoice.Logprobs == nil {
-					existingChoice.Logprobs = &model.LogprobsContent{}
-				}
-				existingChoice.Logprobs.Content = append(existingChoice.Logprobs.Content, choice.Logprobs.Content...)
+	msg := &model.Message{Role: "assistant"}
+	if text != "" {
+		msg.Content = model.MessageContent{Content: &text}
+	}
+	if reasoning != "" {
+		msg.ReasoningContent = &reasoning
+	}
+	if len(i.toolCalls) > 0 {
+		for idx := 0; idx < len(i.toolCalls); idx++ {
+			if tc, ok := i.toolCalls[idx]; ok {
+				msg.ToolCalls = append(msg.ToolCalls, *tc)
 			}
 		}
 	}
 
-	// Convert map to slice, sorted by index
-	result.Choices = make([]model.Choice, 0, len(choicesMap))
-	for idx := 0; idx < len(choicesMap); idx++ {
-		if choice, exists := choicesMap[idx]; exists {
-			result.Choices = append(result.Choices, *choice)
+	result.Choices = []model.Choice{{
+		Index:   0,
+		Message: msg,
+	}}
+
+	// If we have the raw response.completed event (passthrough mode), inject the accumulated output into it.
+	// Otherwise, construct the response API object from scratch.
+	if len(i.completedEventResponse) > 0 {
+		var rawMap map[string]interface{}
+		if err := json.Unmarshal(i.completedEventResponse, &rawMap); err == nil {
+			// Construct the output array from our accumulated text/reasoning/tool calls
+			var outputItems []map[string]interface{}
+
+			if reasoning != "" {
+				outputItems = append(outputItems, map[string]interface{}{
+					"id": generateItemID(),
+					"type": "reasoning",
+					"status": "completed",
+					"summary": []map[string]interface{}{
+						{
+							"type": "summary_text",
+							"text": reasoning,
+						},
+					},
+				})
+			}
+
+			if len(i.toolCalls) > 0 {
+				for _, tc := range result.Choices[0].Message.ToolCalls {
+					outputItems = append(outputItems, map[string]interface{}{
+						"id": tc.ID,
+						"type": "function_call",
+						"call_id": tc.ID,
+						"name": tc.Function.Name,
+						"arguments": tc.Function.Arguments,
+						"status": "completed",
+					})
+				}
+			}
+
+			if text != "" {
+				outputItems = append(outputItems, map[string]interface{}{
+					"id": generateItemID(),
+					"type": "message",
+					"role": "assistant",
+					"status": "completed",
+					"content": map[string]interface{}{
+						"items": []map[string]interface{}{
+							{
+								"type": "output_text",
+								"text": text,
+							},
+						},
+					},
+				})
+			}
+
+			rawMap["output"] = outputItems
+			if raw, err := json.Marshal(rawMap); err == nil {
+				result.RawResponse = raw
+			}
+		}
+	} else {
+		// Non-passthrough mode: use the standard struct conversion
+		if raw, err := json.Marshal(convertToResponsesAPIResponse(result)); err == nil {
+			result.RawResponse = raw
 		}
 	}
 
-	// Clear stored chunks after aggregation
 	i.streamChunks = nil
-
 	return result, nil
 }
 

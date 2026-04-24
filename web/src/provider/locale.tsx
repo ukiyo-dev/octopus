@@ -14,6 +14,12 @@ const messages: Record<Locale, typeof zh_hansMessages> = {
     en: enMessages,
 };
 
+const bcp47: Record<Locale, string> = {
+    zh_hans: 'zh-Hans',
+    zh_hant: 'zh-Hant',
+    en: 'en',
+};
+
 export function LocaleProvider({ children }: { children: ReactNode }) {
     const { locale } = useSettingStore();
     const [currentLocale, setCurrentLocale] = useState<Locale>('zh_hans');
@@ -24,7 +30,7 @@ export function LocaleProvider({ children }: { children: ReactNode }) {
 
     return (
         <NextIntlClientProvider
-            locale={currentLocale}
+            locale={bcp47[currentLocale]}
             messages={messages[currentLocale]}
             timeZone="Asia/Shanghai"
         >

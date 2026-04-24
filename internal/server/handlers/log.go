@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
+	"time"
 
 	"github.com/bestruirui/octopus/internal/op"
 	"github.com/bestruirui/octopus/internal/server/middleware"
@@ -114,6 +115,9 @@ func streamLog(c *gin.Context) {
 		select {
 		case <-ctx.Done():
 			return
+		case <-time.After(10 * time.Second):
+			c.Writer.Write([]byte("data: {\"type\":\"heartbeat\"}\n\n"))
+			c.Writer.Flush()
 		case log, ok := <-logChan:
 			if !ok {
 				return

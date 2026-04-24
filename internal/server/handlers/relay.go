@@ -15,32 +15,24 @@ func init() {
 		Use(middleware.APIKeyAuth()).
 		Use(middleware.RequireJSON()).
 		AddRoute(
-			router.NewRoute("/chat/completions", http.MethodPost).
-				Handle(chat),
-		).
-		AddRoute(
-			router.NewRoute("/responses", http.MethodPost).
-				Handle(response),
-		).
-		AddRoute(
-			router.NewRoute("/messages", http.MethodPost).
-				Handle(message),
-		).
-		AddRoute(
-			router.NewRoute("/embeddings", http.MethodPost).
-				Handle(embedding),
+			router.NewRoute("/*path", http.MethodPost).
+				Handle(dispatch),
 		)
 }
 
-func chat(c *gin.Context) {
-	relay.Handler(inbound.InboundTypeOpenAIChat, c)
+// dispatch routes requests based on path, falling back to passthrough for unknown endpoints.
+func dispatch(c *gin.Context) {
+	switch c.Param("path") {
+	case "/chat/completions":
+		relay.Handler(inbound.InboundTypeOpenAIChat, c)
+	case "/responses":
+		relay.Handler(inbound.InboundTypeOpenAIResponse, c)
+	case "/messages":
+		relay.Handler(inbound.InboundTypeAnthropic, c)
+	case "/embeddings":
+		relay.Handler(inbound.InboundTypeOpenAIEmbedding, c)
+	default:
+		relay.Handler(inbound.InboundTypePassthrough, c)
+	}
 }
-func response(c *gin.Context) {
-	relay.Handler(inbound.InboundTypeOpenAIResponse, c)
-}
-func message(c *gin.Context) {
-	relay.Handler(inbound.InboundTypeAnthropic, c)
-}
-func embedding(c *gin.Context) {
-	relay.Handler(inbound.InboundTypeOpenAIEmbedding, c)
-}
+

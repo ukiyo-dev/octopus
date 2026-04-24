@@ -36,33 +36,35 @@ type OpenAIEmbeddingResponse struct {
 }
 
 func (o *EmbeddingOutbound) TransformRequest(ctx context.Context, request *model.InternalLLMRequest, baseUrl, key string) (*http.Request, error) {
-	// 验证这是一个 embedding 请求
-	if !request.IsEmbeddingRequest() {
+	if !request.IsEmbeddingRequest() && request.RawAPIFormat != model.APIFormatPassthrough {
 		return nil, errors.New("not an embedding request")
 	}
 
-	// 构建 embedding 请求体（使用 OpenAI 标准字段名）
-	embeddingRequest := map[string]any{
-		"model": request.Model,
-		"input": request.EmbeddingInput, // 上游期望 "input"
-	}
+	passthrough := len(request.RawRequest) > 0 && (request.RawAPIFormat == model.APIFormatOpenAIEmbedding || request.RawAPIFormat == model.APIFormatPassthrough)
 
-	// 添加可选参数
-	if request.EmbeddingDimensions != nil {
-		embeddingRequest["dimensions"] = *request.EmbeddingDimensions
-	}
+	var body []byte
+	var err error
 
-	if request.EmbeddingEncodingFormat != nil {
-		embeddingRequest["encoding_format"] = *request.EmbeddingEncodingFormat
-	}
-
-	if request.User != nil {
-		embeddingRequest["user"] = *request.User
-	}
-
-	body, err := json.Marshal(embeddingRequest)
-	if err != nil {
-		return nil, fmt.Errorf("failed to marshal request: %w", err)
+	if passthrough {
+		body = patchRawRequest(request.RawRequest, request.Model, false)
+	} else {
+		embeddingRequest := map[string]any{
+			"model": request.Model,
+			"input": request.EmbeddingInput,
+		}
+		if request.EmbeddingDimensions != nil {
+			embeddingRequest["dimensions"] = *request.EmbeddingDimensions
+		}
+		if request.EmbeddingEncodingFormat != nil {
+			embeddingRequest["encoding_format"] = *request.EmbeddingEncodingFormat
+		}
+		if request.User != nil {
+			embeddingRequest["user"] = *request.User
+		}
+		body, err = json.Marshal(embeddingRequest)
+		if err != nil {
+			return nil, fmt.Errorf("failed to marshal request: %w", err)
+		}
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "", bytes.NewReader(body))
@@ -78,7 +80,11 @@ func (o *EmbeddingOutbound) TransformRequest(ctx context.Context, request *model
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse base url: %w", err)
 	}
-	parsedUrl.Path = parsedUrl.Path + "/embeddings"
+	if passthrough && request.RawPath != "" {
+		parsedUrl.Path = parsedUrl.Path + request.RawPath
+	} else {
+		parsedUrl.Path = parsedUrl.Path + "/embeddings"
+	}
 	req.URL = parsedUrl
 	req.Method = http.MethodPost
 	return req, nil
@@ -100,14 +106,15 @@ func (o *EmbeddingOutbound) TransformResponse(ctx context.Context, response *htt
 		return nil, fmt.Errorf("failed to unmarshal response: %w", err)
 	}
 
-	// 转换为内部格式
 	resp := &model.InternalLLMResponse{
-		ID:            openAIResp.ID,
-		Object:        openAIResp.Object,
-		Created:       openAIResp.Created,
-		Model:         openAIResp.Model,
-		EmbeddingData: openAIResp.Data, // 上游返回 "data"，映射到内部字段
-		Usage:         openAIResp.Usage,
+		ID:                openAIResp.ID,
+		Object:            openAIResp.Object,
+		Created:           openAIResp.Created,
+		Model:             openAIResp.Model,
+		EmbeddingData:     openAIResp.Data,
+		Usage:             openAIResp.Usage,
+		RawResponse:       body,
+		RawResponseFormat: model.APIFormatOpenAIEmbedding,
 	}
 
 	return resp, nil

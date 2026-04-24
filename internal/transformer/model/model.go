@@ -21,6 +21,8 @@ const (
 	APIFormatAnthropicMessage      APIFormat = "anthropic/messages"
 	APIFormatAiSDKText             APIFormat = "aisdk/text"
 	APIFormatAiSDKDataStream       APIFormat = "aisdk/datastream"
+	// APIFormatPassthrough is used for unknown/future endpoints that are forwarded as raw bytes.
+	APIFormatPassthrough APIFormat = "passthrough"
 )
 
 // Request is the unified llm request model for AxonHub, to keep compatibility with major app and framework.
@@ -246,11 +248,20 @@ type InternalLLMRequest struct {
 	// Query stores the original query parameters from the inbound request.
 	// This is a help field and will not be sent to the llm service.
 	Query url.Values `json:"-"`
+
+	// RawPath is the path suffix from the original client request (after stripping the /v1 prefix).
+	// Used to forward the exact path to the upstream in same-protocol passthrough mode.
+	RawPath string `json:"-"`
 }
 
 func (r *InternalLLMRequest) Validate() error {
 	if r.Model == "" {
 		return errors.New("model is required")
+	}
+
+	// Passthrough requests carry raw bytes; content fields are not expected
+	if r.RawAPIFormat == APIFormatPassthrough {
+		return nil
 	}
 
 	// 检查是否是 embedding 请求
@@ -665,6 +676,12 @@ type InternalLLMResponse struct {
 
 	// Error is the error information, will present if request to llm service failed with status >= 400.
 	Error *ResponseError `json:"error,omitempty"`
+
+	// RawResponse stores the raw response bytes from the upstream.
+	// Inbound transformers use this for passthrough when the upstream format matches the client format.
+	RawResponse []byte `json:"-"`
+	// RawResponseFormat identifies the API format of the bytes stored in RawResponse.
+	RawResponseFormat APIFormat `json:"-"`
 }
 
 func (r *InternalLLMResponse) ClearHelpFields() {

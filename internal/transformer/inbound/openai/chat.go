@@ -19,13 +19,16 @@ func (i *ChatInbound) TransformRequest(ctx context.Context, body []byte) (*model
 	if err := json.Unmarshal(body, &request); err != nil {
 		return nil, err
 	}
+	request.RawRequest = body
+	request.RawAPIFormat = model.APIFormatOpenAIChatCompletion
 	return &request, nil
 }
 
 func (i *ChatInbound) TransformResponse(ctx context.Context, response *model.InternalLLMResponse) ([]byte, error) {
-	// Store the response for later retrieval
 	i.storedResponse = response
-
+	if response.RawResponseFormat == model.APIFormatOpenAIChatCompletion && len(response.RawResponse) > 0 {
+		return response.RawResponse, nil
+	}
 	body, err := json.Marshal(response)
 	if err != nil {
 		return nil, err
@@ -38,8 +41,13 @@ func (i *ChatInbound) TransformStream(ctx context.Context, stream *model.Interna
 		return []byte("data: [DONE]\n\n"), nil
 	}
 
-	// Store the chunk for aggregation
+	// Store the chunk for aggregation (needed for metrics regardless of passthrough)
 	i.streamChunks = append(i.streamChunks, stream)
+
+	// Passthrough: upstream and client speak the same format, forward raw bytes directly
+	if stream.RawResponseFormat == model.APIFormatOpenAIChatCompletion && len(stream.RawResponse) > 0 {
+		return []byte("data: " + string(stream.RawResponse) + "\n\n"), nil
+	}
 
 	var body []byte
 	var err error
@@ -191,6 +199,11 @@ func (i *ChatInbound) GetInternalResponse(ctx context.Context) (*model.InternalL
 		if choice, exists := choicesMap[idx]; exists {
 			result.Choices = append(result.Choices, *choice)
 		}
+	}
+
+	// Store marshaled result as RawResponse for logging
+	if raw, err := json.Marshal(result); err == nil {
+		result.RawResponse = raw
 	}
 
 	// Clear stored chunks after aggregation

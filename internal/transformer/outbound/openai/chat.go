@@ -16,26 +16,33 @@ import (
 type ChatOutbound struct{}
 
 func (o *ChatOutbound) TransformRequest(ctx context.Context, request *model.InternalLLMRequest, baseUrl, key string) (*http.Request, error) {
-	request.ClearHelpFields()
+	isNativeFormat := request.RawAPIFormat == model.APIFormatOpenAIChatCompletion
+	isPassthroughFormat := request.RawAPIFormat == model.APIFormatPassthrough
+	passthrough := len(request.RawRequest) > 0 && (isNativeFormat || isPassthroughFormat)
 
-	// Convert developer role to system role for compatibility
-	for i := range request.Messages {
-		if request.Messages[i].Role == "developer" {
-			request.Messages[i].Role = "system"
+	var body []byte
+	var err error
+
+	if passthrough {
+		body = patchRawRequest(request.RawRequest, request.Model, isNativeFormat)
+	} else {
+		request.ClearHelpFields()
+		for i := range request.Messages {
+			if request.Messages[i].Role == "developer" {
+				request.Messages[i].Role = "system"
+			}
 		}
-	}
-
-	if request.Stream != nil && *request.Stream {
-		if request.StreamOptions == nil {
-			request.StreamOptions = &model.StreamOptions{IncludeUsage: true}
-		} else if !request.StreamOptions.IncludeUsage {
-			request.StreamOptions.IncludeUsage = true
+		if request.Stream != nil && *request.Stream {
+			if request.StreamOptions == nil {
+				request.StreamOptions = &model.StreamOptions{IncludeUsage: true}
+			} else if !request.StreamOptions.IncludeUsage {
+				request.StreamOptions.IncludeUsage = true
+			}
 		}
-	}
-
-	body, err := json.Marshal(request)
-	if err != nil {
-		return nil, fmt.Errorf("failed to marshal request: %w", err)
+		body, err = json.Marshal(request)
+		if err != nil {
+			return nil, fmt.Errorf("failed to marshal request: %w", err)
+		}
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "", bytes.NewReader(body))
@@ -51,7 +58,11 @@ func (o *ChatOutbound) TransformRequest(ctx context.Context, request *model.Inte
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse base url: %w", err)
 	}
-	parsedUrl.Path = parsedUrl.Path + "/chat/completions"
+	if passthrough && request.RawPath != "" {
+		parsedUrl.Path = parsedUrl.Path + request.RawPath
+	} else {
+		parsedUrl.Path = parsedUrl.Path + "/chat/completions"
+	}
 	req.URL = parsedUrl
 	req.Method = http.MethodPost
 	return req, nil
@@ -71,13 +82,17 @@ func (o *ChatOutbound) TransformResponse(ctx context.Context, response *http.Res
 	if err := json.Unmarshal(body, &resp); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal response: %w", err)
 	}
+	resp.RawResponse = body
+	resp.RawResponseFormat = model.APIFormatOpenAIChatCompletion
 	return &resp, nil
 }
 
 func (o *ChatOutbound) TransformStream(ctx context.Context, eventData []byte) (*model.InternalLLMResponse, error) {
 	if bytes.HasPrefix(eventData, []byte("[DONE]")) {
 		return &model.InternalLLMResponse{
-			Object: "[DONE]",
+			Object:            "[DONE]",
+			RawResponse:       eventData,
+			RawResponseFormat: model.APIFormatOpenAIChatCompletion,
 		}, nil
 	}
 
@@ -94,5 +109,7 @@ func (o *ChatOutbound) TransformStream(ctx context.Context, eventData []byte) (*
 	if err := json.Unmarshal(eventData, &resp); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal stream chunk: %w", err)
 	}
+	resp.RawResponse = eventData
+	resp.RawResponseFormat = model.APIFormatOpenAIChatCompletion
 	return &resp, nil
 }

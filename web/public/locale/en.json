@@ -428,6 +428,10 @@
         "list": {
             "noMore": "No more logs"
         },
+        "stream": {
+            "connected": "Live stream connected",
+            "reconnecting": "Disconnected, reconnecting…"
+        },
         "card": {
             "error": "Error",
             "errorInfo": "Error Info",

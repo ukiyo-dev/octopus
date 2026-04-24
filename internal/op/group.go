@@ -3,6 +3,7 @@ package op
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/bestruirui/octopus/internal/db"
 	"github.com/bestruirui/octopus/internal/model"
@@ -41,8 +42,23 @@ func GroupGet(id int, ctx context.Context) (*model.Group, error) {
 func GroupGetEnabledMap(name string, ctx context.Context) (model.Group, error) {
 	group, ok := groupMap.Get(name)
 	if !ok {
-		return model.Group{}, fmt.Errorf("group not found")
+		// Fall back to startswith: find the group with the longest name that is a prefix of the requested model name
+		var best *model.Group
+		bestLen := -1
+		for gname, g := range groupMap.GetAll() {
+			if strings.HasPrefix(name, gname) && len(gname) > bestLen {
+				tmp := g
+				best = &tmp
+				bestLen = len(gname)
+			}
+		}
+		if best == nil {
+			return model.Group{}, fmt.Errorf("group not found")
+		}
+		group = *best
+		ok = true
 	}
+	_ = ok
 	if len(group.Items) == 0 {
 		group.Items = nil
 		return group, nil

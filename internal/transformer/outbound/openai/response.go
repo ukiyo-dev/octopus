@@ -21,6 +21,7 @@ type ResponseOutbound struct {
 	streamID    string
 	streamModel string
 	initialized bool
+	passthrough bool
 }
 
 func (o *ResponseOutbound) TransformRequest(ctx context.Context, request *model.InternalLLMRequest, baseUrl, key string) (*http.Request, error) {
@@ -28,12 +29,19 @@ func (o *ResponseOutbound) TransformRequest(ctx context.Context, request *model.
 		return nil, fmt.Errorf("request is nil")
 	}
 
-	// Convert to Responses API request format
-	responsesReq := ConvertToResponsesRequest(request)
+	o.passthrough = len(request.RawRequest) > 0 && (request.RawAPIFormat == model.APIFormatOpenAIResponse || request.RawAPIFormat == model.APIFormatPassthrough)
 
-	body, err := json.Marshal(responsesReq)
-	if err != nil {
-		return nil, fmt.Errorf("failed to marshal responses api request: %w", err)
+	var body []byte
+	var err error
+
+	if o.passthrough {
+		body = patchRawRequest(request.RawRequest, request.Model, false)
+	} else {
+		responsesReq := ConvertToResponsesRequest(request)
+		body, err = json.Marshal(responsesReq)
+		if err != nil {
+			return nil, fmt.Errorf("failed to marshal responses api request: %w", err)
+		}
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "", bytes.NewReader(body))
@@ -41,17 +49,19 @@ func (o *ResponseOutbound) TransformRequest(ctx context.Context, request *model.
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
 
-	// Set headers
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("Authorization", "Bearer "+key)
 
-	// Parse and set URL
 	parsedUrl, err := url.Parse(strings.TrimSuffix(baseUrl, "/"))
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse base url: %w", err)
 	}
-	parsedUrl.Path = parsedUrl.Path + "/responses"
+	if o.passthrough && request.RawPath != "" {
+		parsedUrl.Path = parsedUrl.Path + request.RawPath
+	} else {
+		parsedUrl.Path = parsedUrl.Path + "/responses"
+	}
 	req.URL = parsedUrl
 	req.Method = http.MethodPost
 
@@ -91,8 +101,10 @@ func (o *ResponseOutbound) TransformResponse(ctx context.Context, response *http
 		return nil, fmt.Errorf("failed to unmarshal responses api response: %w", err)
 	}
 
-	// Convert to internal response
-	return convertToLLMResponseFromResponses(&resp), nil
+	internalResp := convertToLLMResponseFromResponses(&resp)
+	internalResp.RawResponse = body
+	internalResp.RawResponseFormat = model.APIFormatOpenAIResponse
+	return internalResp, nil
 }
 
 func (o *ResponseOutbound) TransformStream(ctx context.Context, eventData []byte) (*model.InternalLLMResponse, error) {
@@ -103,8 +115,38 @@ func (o *ResponseOutbound) TransformStream(ctx context.Context, eventData []byte
 	// Handle [DONE] marker
 	if bytes.HasPrefix(eventData, []byte("[DONE]")) {
 		return &model.InternalLLMResponse{
-			Object: "[DONE]",
+			Object:            "[DONE]",
+			RawResponse:       eventData,
+			RawResponseFormat: model.APIFormatOpenAIResponse,
 		}, nil
+	}
+
+	// Passthrough: forward all events as-is, extract usage where available for metrics
+	if o.passthrough {
+		resp := &model.InternalLLMResponse{
+			Object:            "response.event",
+			RawResponse:       eventData,
+			RawResponseFormat: model.APIFormatOpenAIResponse,
+		}
+		var ev struct {
+			Type     string           `json:"type"`
+			Response *json.RawMessage `json:"response"`
+		}
+		if err := json.Unmarshal(eventData, &ev); err == nil && ev.Response != nil {
+			var meta struct {
+				Usage *ResponsesUsage `json:"usage"`
+				ID    string          `json:"id"`
+				Model string          `json:"model"`
+			}
+			if err := json.Unmarshal(*ev.Response, &meta); err == nil {
+				if meta.Usage != nil {
+					resp.Usage = convertResponsesUsage(meta.Usage)
+				}
+				resp.ID = meta.ID
+				resp.Model = meta.Model
+			}
+		}
+		return resp, nil
 	}
 
 	// Initialize state if needed

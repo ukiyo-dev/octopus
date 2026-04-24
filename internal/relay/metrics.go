@@ -159,22 +159,28 @@ func (m *RelayMetrics) saveLog(ctx context.Context, err error, duration time.Dur
 
 	// 请求内容
 	if m.InternalRequest != nil {
-		if reqJSON, jsonErr := json.Marshal(m.InternalRequest); jsonErr == nil {
+		if len(m.InternalRequest.RawRequest) > 0 {
+			relayLog.RequestContent = string(m.InternalRequest.RawRequest)
+		} else if reqJSON, jsonErr := json.Marshal(m.InternalRequest); jsonErr == nil {
 			relayLog.RequestContent = string(reqJSON)
 		}
 	}
 
 	// 响应内容
 	if m.InternalResponse != nil {
-		respForLog := m.filterResponseForLog(m.InternalResponse)
-		if respJSON, jsonErr := json.Marshal(respForLog); jsonErr == nil {
-			if m.InternalResponse.Usage != nil && m.InternalResponse.Usage.AnthropicUsage {
-				respStr := string(respJSON)
-				old := `"usage":{`
-				insert := fmt.Sprintf(`"usage":{"cache_creation_input_tokens":%d,`, m.InternalResponse.Usage.CacheCreationInputTokens)
-				respJSON = []byte(strings.Replace(respStr, old, insert, 1))
+		if len(m.InternalResponse.RawResponse) > 0 {
+			relayLog.ResponseContent = string(m.InternalResponse.RawResponse)
+		} else {
+			respForLog := m.filterResponseForLog(m.InternalResponse)
+			if respJSON, jsonErr := json.Marshal(respForLog); jsonErr == nil {
+				if m.InternalResponse.Usage != nil && m.InternalResponse.Usage.AnthropicUsage {
+					respStr := string(respJSON)
+					old := `"usage":{`
+					insert := fmt.Sprintf(`"usage":{"cache_creation_input_tokens":%d,`, m.InternalResponse.Usage.CacheCreationInputTokens)
+					respJSON = []byte(strings.Replace(respStr, old, insert, 1))
+				}
+				relayLog.ResponseContent = string(respJSON)
 			}
-			relayLog.ResponseContent = string(respJSON)
 		}
 	}
 

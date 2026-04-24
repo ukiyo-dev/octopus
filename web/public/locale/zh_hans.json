@@ -428,6 +428,10 @@
         "list": {
             "noMore": "没有更多日志了"
         },
+        "stream": {
+            "connected": "实时推送已连接",
+            "reconnecting": "连接断开，正在重连…"
+        },
         "card": {
             "error": "错误",
             "errorInfo": "错误信息",

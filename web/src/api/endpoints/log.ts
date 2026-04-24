@@ -100,7 +100,7 @@ const logsInfiniteQueryKey = (pageSize: number) => ['logs', 'infinite', pageSize
 export function useLogs(options: { pageSize?: number } = {}) {
     const { pageSize = 20 } = options;
 
-    const [isConnected, setIsConnected] = useState(false);
+    const [isConnected, setIsConnected] = useState(true);
     const [error, setError] = useState<Error | null>(null);
     const eventSourceRef = useRef<EventSource | null>(null);
 
@@ -154,8 +154,20 @@ export function useLogs(options: { pageSize?: number } = {}) {
 
     useEffect(() => {
         let cancelled = false;
+        let retryTimeout: ReturnType<typeof setTimeout> | null = null;
+        let heartbeatTimeout: ReturnType<typeof setTimeout> | null = null;
+        let retryDelay = 1000;
+        const HEARTBEAT_TIMEOUT = 15000;
+
+        const resetHeartbeat = () => {
+            if (heartbeatTimeout) clearTimeout(heartbeatTimeout);
+            heartbeatTimeout = setTimeout(() => {
+                setIsConnected(false);
+            }, HEARTBEAT_TIMEOUT);
+        };
 
         const connect = async () => {
+            if (cancelled) return;
             try {
                 const { token } = await apiClient.get<{ token: string }>('/api/v1/log/stream-token');
                 if (cancelled) return;
@@ -166,11 +178,16 @@ export function useLogs(options: { pageSize?: number } = {}) {
                 eventSource.onopen = () => {
                     setIsConnected(true);
                     setError(null);
+                    retryDelay = 1000;
+                    resetHeartbeat();
                 };
 
                 eventSource.onmessage = (event) => {
+                    setIsConnected(true);
+                    resetHeartbeat();
                     try {
                         const log: RelayLog = JSON.parse(event.data);
+                        if ((log as { type?: string }).type === 'heartbeat') return;
                         queryClient.setQueryData(
                             logsInfiniteQueryKey(pageSize),
                             (old: InfiniteData<RelayLog[], number> | undefined) => {
@@ -192,14 +209,26 @@ export function useLogs(options: { pageSize?: number } = {}) {
 
                 eventSource.onerror = () => {
                     setIsConnected(false);
-                    setError(new Error('SSE 连接断开'));
+                    if (heartbeatTimeout) clearTimeout(heartbeatTimeout);
                     eventSource.close();
                     eventSourceRef.current = null;
+                    if (!cancelled) {
+                        setError(new Error('SSE 连接断开，正在重连…'));
+                        retryTimeout = setTimeout(() => {
+                            retryDelay = Math.min(retryDelay * 2, 30000);
+                            void connect();
+                        }, retryDelay);
+                    }
                 };
             } catch (e) {
                 if (cancelled) return;
+                setIsConnected(false);
                 setError(e instanceof Error ? e : new Error('获取 stream token 失败'));
                 logger.error('获取 stream token 失败:', e);
+                retryTimeout = setTimeout(() => {
+                    retryDelay = Math.min(retryDelay * 2, 30000);
+                    void connect();
+                }, retryDelay);
             }
         };
 
@@ -207,9 +236,10 @@ export function useLogs(options: { pageSize?: number } = {}) {
 
         return () => {
             cancelled = true;
+            if (retryTimeout) clearTimeout(retryTimeout);
+            if (heartbeatTimeout) clearTimeout(heartbeatTimeout);
             eventSourceRef.current?.close();
             eventSourceRef.current = null;
-            setIsConnected(false);
         };
     }, [pageSize, queryClient]);
 

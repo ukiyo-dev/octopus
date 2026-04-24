@@ -1,6 +1,7 @@
 package relay
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -32,7 +33,9 @@ func Handler(inboundType inbound.InboundType, c *gin.Context) {
 	supportedModels := c.GetString("supported_models")
 	if supportedModels != "" {
 		supportedModelsArray := strings.Split(supportedModels, ",")
-		if !slices.Contains(supportedModelsArray, internalRequest.Model) {
+		if !slices.ContainsFunc(supportedModelsArray, func(m string) bool {
+			return strings.HasPrefix(internalRequest.Model, m)
+		}) {
 			resp.Error(c, http.StatusBadRequest, "model not supported")
 			return
 		}
@@ -230,9 +233,11 @@ func parseRequest(inboundType inbound.InboundType, c *gin.Context) (*model.Inter
 
 	// Pass through the original query parameters
 	internalRequest.Query = c.Request.URL.Query()
+	// Store path suffix (after /v1) for URL passthrough in same-protocol relay
+	internalRequest.RawPath = strings.TrimPrefix(c.Request.URL.Path, "/v1")
 
 	if err := internalRequest.Validate(); err != nil {
-		resp.Error(c, http.StatusBadRequest, err.Error())
+		resp.Error(c, http.StatusForbidden, err.Error())
 		return nil, nil, err
 	}
 
@@ -275,7 +280,14 @@ func (ra *relayAttempt) forward() (int, error) {
 	}
 
 	// 处理响应
-	if ra.internalRequest.Stream != nil && *ra.internalRequest.Stream {
+	isSSE := strings.Contains(strings.ToLower(response.Header.Get("Content-Type")), "text/event-stream")
+	if (ra.internalRequest.Stream != nil && *ra.internalRequest.Stream) || isSSE {
+		if collector, ok := ra.inAdapter.(rawStreamCollector); ok {
+			if err := ra.handleRawStream(ctx, response, collector); err != nil {
+				return 0, err
+			}
+			return response.StatusCode, nil
+		}
 		if err := ra.handleStreamResponse(ctx, response); err != nil {
 			return 0, err
 		}
@@ -319,6 +331,101 @@ func (ra *relayAttempt) sendRequest(req *http.Request) (*http.Response, error) {
 	}
 
 	return response, nil
+}
+
+// rawStreamCollector is implemented by inbound adapters that want to receive the
+// full raw SSE bytes after the stream ends (for post-stream usage extraction).
+type rawStreamCollector interface {
+	CollectRawStream(data []byte)
+}
+
+// handleRawStream pipes upstream SSE bytes directly to the client without
+// any transformation, while collecting them via TeeReader for post-stream usage.
+func (ra *relayAttempt) handleRawStream(ctx context.Context, response *http.Response, collector rawStreamCollector) error {
+	ra.c.Header("Content-Type", "text/event-stream")
+	ra.c.Header("Cache-Control", "no-cache")
+	ra.c.Header("Connection", "keep-alive")
+	ra.c.Header("X-Accel-Buffering", "no")
+
+	var buf bytes.Buffer
+	reader := io.TeeReader(response.Body, &buf)
+
+	type readResult struct {
+		n   int
+		err error
+	}
+	results := make(chan readResult, 1)
+	chunk := make([]byte, 4096)
+	go func() {
+		defer close(results)
+		for {
+			n, err := reader.Read(chunk)
+			if n > 0 {
+				results <- readResult{n: n}
+			}
+			if err != nil {
+				if err != io.EOF {
+					results <- readResult{err: err}
+				}
+				return
+			}
+		}
+	}()
+
+	var firstTokenTimer *time.Timer
+	var firstTokenC <-chan time.Time
+	firstToken := true
+	if ra.firstTokenTimeOutSec > 0 {
+		firstTokenTimer = time.NewTimer(time.Duration(ra.firstTokenTimeOutSec) * time.Second)
+		firstTokenC = firstTokenTimer.C
+		defer func() {
+			if firstTokenTimer != nil {
+				firstTokenTimer.Stop()
+			}
+		}()
+	}
+
+	written := 0
+	for {
+		select {
+		case <-ctx.Done():
+			log.Infof("client disconnected, stopping raw stream")
+			collector.CollectRawStream(buf.Bytes())
+			return nil
+		case <-firstTokenC:
+			log.Warnf("first token timeout (%ds), switching channel", ra.firstTokenTimeOutSec)
+			_ = response.Body.Close()
+			return fmt.Errorf("first token timeout (%ds)", ra.firstTokenTimeOutSec)
+		case r, ok := <-results:
+			if !ok {
+				log.Infof("raw stream end")
+				collector.CollectRawStream(buf.Bytes())
+				return nil
+			}
+			if r.err != nil {
+				log.Warnf("failed to read raw stream: %v", r.err)
+				collector.CollectRawStream(buf.Bytes())
+				return fmt.Errorf("failed to read raw stream: %w", r.err)
+			}
+			if firstToken {
+				ra.metrics.SetFirstTokenTime(time.Now())
+				firstToken = false
+				if firstTokenTimer != nil {
+					if !firstTokenTimer.Stop() {
+						select {
+						case <-firstTokenTimer.C:
+						default:
+						}
+					}
+					firstTokenTimer = nil
+					firstTokenC = nil
+				}
+			}
+			ra.c.Writer.Write(chunk[:r.n])
+			ra.c.Writer.Flush()
+			written += r.n
+		}
+	}
 }
 
 // handleStreamResponse 处理流式响应
