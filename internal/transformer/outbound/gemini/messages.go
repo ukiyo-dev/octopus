@@ -3,6 +3,7 @@ package gemini
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -10,6 +11,8 @@ import (
 	"net/url"
 	"reflect"
 	"strings"
+
+	genai "google.golang.org/genai"
 
 	"github.com/bestruirui/octopus/internal/transformer/model"
 	"github.com/bestruirui/octopus/internal/utils/xurl"
@@ -93,13 +96,13 @@ func (o *MessagesOutbound) TransformResponse(ctx context.Context, response *http
 		return nil, fmt.Errorf("response body is empty")
 	}
 
-	var geminiResp model.GeminiGenerateContentResponse
+	var geminiResp genai.GenerateContentResponse
 	if err := json.Unmarshal(body, &geminiResp); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal gemini response: %w", err)
 	}
 
 	// Convert Gemini response to internal format
-	result := convertGeminiToLLMResponse(&geminiResp, false)
+	result := convertGenaiToLLMResponse(&geminiResp, false)
 	result.RawResponse = body
 	result.RawResponseFormat = model.APIFormatGeminiContents
 	return result, nil
@@ -114,15 +117,109 @@ func (o *MessagesOutbound) TransformStream(ctx context.Context, eventData []byte
 	}
 
 	// Parse Gemini streaming response
-	var geminiResp model.GeminiGenerateContentResponse
+	var geminiResp genai.GenerateContentResponse
 	if err := json.Unmarshal(eventData, &geminiResp); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal gemini stream chunk: %w", err)
 	}
 
 	// Convert to internal format
-	result := convertGeminiToLLMResponse(&geminiResp, true)
+	result := convertGenaiToLLMResponse(&geminiResp, true)
 	result.RawResponse = eventData
 	result.RawResponseFormat = model.APIFormatGeminiContents
+	return result, nil
+}
+
+func (o *MessagesOutbound) ReconstructFromRawSSE(ctx context.Context, rawBytes []byte) (*model.InternalLLMResponse, error) {
+	type choiceState struct {
+		text      strings.Builder
+		reasoning strings.Builder
+		toolCalls []model.ToolCall
+		finish    *string
+	}
+	choices := map[int]*choiceState{}
+	var usage *model.Usage
+	var id, mdl string
+
+	for _, line := range bytes.Split(rawBytes, []byte("\n")) {
+		line = bytes.TrimRight(line, "\r")
+		if !bytes.HasPrefix(line, []byte("data: ")) {
+			continue
+		}
+		data := bytes.TrimPrefix(line, []byte("data: "))
+		if bytes.HasPrefix(data, []byte("[DONE]")) || len(data) == 0 {
+			continue
+		}
+		var geminiResp genai.GenerateContentResponse
+		if err := json.Unmarshal(data, &geminiResp); err != nil {
+			continue
+		}
+		chunk := convertGenaiToLLMResponse(&geminiResp, true)
+		if chunk.ID != "" {
+			id = chunk.ID
+		}
+		if chunk.Model != "" {
+			mdl = chunk.Model
+		}
+		if chunk.Usage != nil {
+			usage = chunk.Usage
+		}
+		for _, c := range chunk.Choices {
+			cs, ok := choices[c.Index]
+			if !ok {
+				cs = &choiceState{}
+				choices[c.Index] = cs
+			}
+			if c.Delta != nil {
+				if c.Delta.Content.Content != nil {
+					cs.text.WriteString(*c.Delta.Content.Content)
+				}
+				if c.Delta.ReasoningContent != nil {
+					cs.reasoning.WriteString(*c.Delta.ReasoningContent)
+				}
+				if len(c.Delta.ToolCalls) > 0 {
+					cs.toolCalls = append(cs.toolCalls, c.Delta.ToolCalls...)
+				}
+			}
+			if c.FinishReason != nil {
+				cs.finish = c.FinishReason
+			}
+		}
+	}
+
+	if len(choices) == 0 && usage == nil {
+		return nil, nil
+	}
+
+	result := &model.InternalLLMResponse{
+		ID:     id,
+		Object: "chat.completion",
+		Model:  mdl,
+		Usage:  usage,
+	}
+	result.Choices = make([]model.Choice, len(choices))
+	for idx, cs := range choices {
+		msg := &model.Message{Role: "assistant"}
+		if cs.text.Len() > 0 {
+			t := cs.text.String()
+			msg.Content = model.MessageContent{Content: &t}
+		}
+		if cs.reasoning.Len() > 0 {
+			r := cs.reasoning.String()
+			msg.ReasoningContent = &r
+		}
+		if len(cs.toolCalls) > 0 {
+			msg.ToolCalls = cs.toolCalls
+		}
+		result.Choices[idx] = model.Choice{
+			Index:        idx,
+			Message:      msg,
+			FinishReason: cs.finish,
+		}
+	}
+	if raw, err := json.Marshal(result); err == nil {
+		result.RawResponse = raw
+		result.RawResponseFormat = model.APIFormatGeminiContents
+	}
 	return result, nil
 }
 
@@ -450,7 +547,7 @@ func convertLLMToolResultToGeminiContent(msg *model.Message) *model.GeminiConten
 	return content
 }
 
-func convertGeminiToLLMResponse(geminiResp *model.GeminiGenerateContentResponse, isStream bool) *model.InternalLLMResponse {
+func convertGenaiToLLMResponse(geminiResp *genai.GenerateContentResponse, isStream bool) *model.InternalLLMResponse {
 	resp := &model.InternalLLMResponse{
 		Choices: []model.Choice{},
 	}
@@ -464,12 +561,12 @@ func convertGeminiToLLMResponse(geminiResp *model.GeminiGenerateContentResponse,
 	// Convert candidates to choices
 	for _, candidate := range geminiResp.Candidates {
 		choice := model.Choice{
-			Index: candidate.Index,
+			Index: int(candidate.Index),
 		}
 
 		// Convert finish reason
-		if candidate.FinishReason != nil {
-			reason := convertGeminiFinishReason(*candidate.FinishReason)
+		if candidate.FinishReason != "" {
+			reason := convertGeminiFinishReason(string(candidate.FinishReason))
 			choice.FinishReason = &reason
 		}
 
@@ -505,7 +602,7 @@ func convertGeminiToLLMResponse(geminiResp *model.GeminiGenerateContentResponse,
 				if part.InlineData != nil {
 					hasInlineData = true
 					// Convert to data URL format: data:{mimeType};base64,{data}
-					dataURL := fmt.Sprintf("data:%s;base64,%s", part.InlineData.MimeType, part.InlineData.Data)
+					dataURL := fmt.Sprintf("data:%s;base64,%s", part.InlineData.MIMEType, base64.StdEncoding.EncodeToString(part.InlineData.Data))
 					contentParts = append(contentParts, model.MessageContentPart{
 						Type: "image_url",
 						ImageURL: &model.ImageURL{
@@ -566,26 +663,27 @@ func convertGeminiToLLMResponse(geminiResp *model.GeminiGenerateContentResponse,
 
 	// Convert usage metadata
 	if geminiResp.UsageMetadata != nil {
+		u := geminiResp.UsageMetadata
 		usage := &model.Usage{
-			PromptTokens:     int64(geminiResp.UsageMetadata.PromptTokenCount),
-			CompletionTokens: int64(geminiResp.UsageMetadata.CandidatesTokenCount),
-			TotalTokens:      int64(geminiResp.UsageMetadata.TotalTokenCount),
+			PromptTokens:     int64(u.PromptTokenCount),
+			CompletionTokens: int64(u.CandidatesTokenCount),
+			TotalTokens:      int64(u.TotalTokenCount),
 		}
 
 		// Add cached tokens to prompt tokens details if present
-		if geminiResp.UsageMetadata.CachedContentTokenCount > 0 {
+		if u.CachedContentTokenCount > 0 {
 			if usage.PromptTokensDetails == nil {
 				usage.PromptTokensDetails = &model.PromptTokensDetails{}
 			}
-			usage.PromptTokensDetails.CachedTokens = int64(geminiResp.UsageMetadata.CachedContentTokenCount)
+			usage.PromptTokensDetails.CachedTokens = int64(u.CachedContentTokenCount)
 		}
 
 		// Add thoughts tokens to completion tokens details if present
-		if geminiResp.UsageMetadata.ThoughtsTokenCount > 0 {
+		if u.ThoughtsTokenCount > 0 {
 			if usage.CompletionTokensDetails == nil {
 				usage.CompletionTokensDetails = &model.CompletionTokensDetails{}
 			}
-			usage.CompletionTokensDetails.ReasoningTokens = int64(geminiResp.UsageMetadata.ThoughtsTokenCount)
+			usage.CompletionTokensDetails.ReasoningTokens = int64(u.ThoughtsTokenCount)
 		}
 
 		resp.Usage = usage

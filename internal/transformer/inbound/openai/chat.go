@@ -219,9 +219,10 @@ func (i *ChatInbound) GetInternalResponse(ctx context.Context) (*model.InternalL
 		}
 	}
 
-	// Store marshaled result as RawResponse for logging
-	if raw, err := json.Marshal(result); err == nil {
+	// Store reconstructed OpenAI Chat Completions JSON as RawResponse for logging.
+	if raw, err := json.Marshal(convertToChatCompletionResponse(result)); err == nil {
 		result.RawResponse = raw
+		result.RawResponseFormat = model.APIFormatOpenAIChatCompletion
 	}
 
 	// Clear stored chunks after aggregation
@@ -231,6 +232,85 @@ func (i *ChatInbound) GetInternalResponse(ctx context.Context) (*model.InternalL
 }
 
 // mergeToolCall merges a tool call delta into the existing tool calls slice
+func convertToChatCompletionResponse(resp *model.InternalLLMResponse) map[string]any {
+	result := map[string]any{
+		"id":      resp.ID,
+		"object":  "chat.completion",
+		"created": resp.Created,
+		"model":   resp.Model,
+	}
+	if resp.SystemFingerprint != "" {
+		result["system_fingerprint"] = resp.SystemFingerprint
+	}
+	if resp.ServiceTier != "" {
+		result["service_tier"] = resp.ServiceTier
+	}
+
+	choices := make([]map[string]any, 0, len(resp.Choices))
+	for _, choice := range resp.Choices {
+		msg := map[string]any{"role": "assistant"}
+		if choice.Message != nil {
+			if choice.Message.Role != "" {
+				msg["role"] = choice.Message.Role
+			}
+			if choice.Message.Content.Content != nil {
+				msg["content"] = *choice.Message.Content.Content
+			} else {
+				msg["content"] = nil
+			}
+			if choice.Message.Refusal != "" {
+				msg["refusal"] = choice.Message.Refusal
+			}
+			if len(choice.Message.ToolCalls) > 0 {
+				toolCalls := make([]map[string]any, 0, len(choice.Message.ToolCalls))
+				for _, tc := range choice.Message.ToolCalls {
+					toolCalls = append(toolCalls, map[string]any{
+						"id":   tc.ID,
+						"type": tc.Type,
+						"function": map[string]any{
+							"name":      tc.Function.Name,
+							"arguments": tc.Function.Arguments,
+						},
+					})
+				}
+				msg["tool_calls"] = toolCalls
+			}
+		}
+
+		item := map[string]any{
+			"index":   choice.Index,
+			"message": msg,
+		}
+		if choice.FinishReason != nil {
+			item["finish_reason"] = *choice.FinishReason
+		} else {
+			item["finish_reason"] = nil
+		}
+		if choice.Logprobs != nil {
+			item["logprobs"] = choice.Logprobs
+		}
+		choices = append(choices, item)
+	}
+	result["choices"] = choices
+
+	if resp.Usage != nil {
+		usage := map[string]any{
+			"prompt_tokens":     resp.Usage.PromptTokens,
+			"completion_tokens": resp.Usage.CompletionTokens,
+			"total_tokens":      resp.Usage.TotalTokens,
+		}
+		if resp.Usage.PromptTokensDetails != nil {
+			usage["prompt_tokens_details"] = resp.Usage.PromptTokensDetails
+		}
+		if resp.Usage.CompletionTokensDetails != nil {
+			usage["completion_tokens_details"] = resp.Usage.CompletionTokensDetails
+		}
+		result["usage"] = usage
+	}
+
+	return result
+}
+
 func mergeToolCall(toolCalls []model.ToolCall, delta model.ToolCall) []model.ToolCall {
 	// Find existing tool call by index
 	for i, tc := range toolCalls {

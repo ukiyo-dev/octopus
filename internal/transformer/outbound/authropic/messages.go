@@ -12,6 +12,8 @@ import (
 
 	"github.com/samber/lo"
 
+	anthropicSDK "github.com/anthropics/anthropic-sdk-go"
+	anthropicSSE "github.com/anthropics/anthropic-sdk-go/packages/ssestream"
 	anthropicModel "github.com/bestruirui/octopus/internal/transformer/inbound/anthropic"
 	"github.com/bestruirui/octopus/internal/transformer/model"
 	"github.com/bestruirui/octopus/internal/utils/xurl"
@@ -124,7 +126,7 @@ func (o *MessageOutbound) TransformResponse(ctx context.Context, response *http.
 	}
 
 	// Convert to internal response
-	result := convertToLLMResponse(&anthropicResp)
+	result := anthropicModel.ConvertToLLMResponse(&anthropicResp)
 	result.RawResponse = body
 	result.RawResponseFormat = model.APIFormatAnthropicMessage
 	return result, nil
@@ -201,7 +203,7 @@ func (o *MessageOutbound) TransformStream(ctx context.Context, eventData []byte)
 					streamEvent.Message.Usage.OutputTokens > 0 ||
 					streamEvent.Message.Usage.CacheReadInputTokens > 0 ||
 					streamEvent.Message.Usage.CacheCreationInputTokens > 0) {
-				o.streamUsage = convertAnthropicUsage(streamEvent.Message.Usage)
+				o.streamUsage = anthropicModel.ConvertAnthropicUsage(streamEvent.Message.Usage)
 				resp.Usage = o.streamUsage
 			}
 		}
@@ -294,7 +296,7 @@ func (o *MessageOutbound) TransformStream(ctx context.Context, eventData []byte)
 
 	case "message_delta":
 		if streamEvent.Usage != nil {
-			usage := convertAnthropicUsage(streamEvent.Usage)
+			usage := anthropicModel.ConvertAnthropicUsage(streamEvent.Usage)
 			if o.streamUsage != nil {
 				usage.PromptTokens = o.streamUsage.PromptTokens
 				usage.TotalTokens = usage.PromptTokens + usage.CompletionTokens
@@ -303,7 +305,7 @@ func (o *MessageOutbound) TransformStream(ctx context.Context, eventData []byte)
 		}
 
 		if streamEvent.Delta != nil && streamEvent.Delta.StopReason != nil {
-			finishReason := convertStopReason(streamEvent.Delta.StopReason)
+			finishReason := anthropicModel.ConvertStopReason(streamEvent.Delta.StopReason)
 			resp.Choices = []model.Choice{
 				{
 					Index:        0,
@@ -328,7 +330,107 @@ func (o *MessageOutbound) TransformStream(ctx context.Context, eventData []byte)
 	return resp, nil
 }
 
-// convertToAnthropicRequest converts internal LLM request to Anthropic format
+func (o *MessageOutbound) ReconstructFromRawSSE(ctx context.Context, rawBytes []byte) (*model.InternalLLMResponse, error) {
+	decoder := anthropicSSE.NewDecoder(&http.Response{Body: io.NopCloser(bytes.NewReader(rawBytes))})
+	stream := anthropicSSE.NewStream[anthropicSDK.MessageStreamEventUnion](decoder, nil)
+
+	var msg anthropicSDK.Message
+	for stream.Next() {
+		if err := msg.Accumulate(stream.Current()); err != nil {
+			return nil, fmt.Errorf("accumulate error: %w", err)
+		}
+	}
+	if err := stream.Err(); err != nil {
+		return nil, fmt.Errorf("stream error: %w", err)
+	}
+	if msg.ID == "" {
+		return nil, nil
+	}
+	return convertSDKAnthropicMessage(&msg), nil
+}
+
+func convertSDKAnthropicMessage(msg *anthropicSDK.Message) *model.InternalLLMResponse {
+	result := &model.InternalLLMResponse{
+		ID:     msg.ID,
+		Object: "chat.completion",
+		Model:  string(msg.Model),
+	}
+
+	var (
+		textParts         []string
+		toolCalls         []model.ToolCall
+		thinkingText      *string
+		thinkingSignature *string
+	)
+	for _, block := range msg.Content {
+		switch block.Type {
+		case "text":
+			if block.Text != "" {
+				textParts = append(textParts, block.Text)
+			}
+		case "tool_use":
+			input := "{}"
+			if len(block.Input) > 0 {
+				input = string(block.Input)
+			}
+			toolCalls = append(toolCalls, model.ToolCall{
+				ID:   block.ID,
+				Type: "function",
+				Function: model.FunctionCall{
+					Name:      block.Name,
+					Arguments: input,
+				},
+			})
+		case "thinking":
+			if block.Thinking != "" {
+				t, s := block.Thinking, block.Signature
+				thinkingText, thinkingSignature = &t, &s
+			}
+		}
+	}
+
+	message := &model.Message{
+		Role:               "assistant",
+		ReasoningContent:   thinkingText,
+		ReasoningSignature: thinkingSignature,
+	}
+	if len(textParts) > 0 {
+		text := strings.Join(textParts, "")
+		message.Content = model.MessageContent{Content: &text}
+	}
+	if len(toolCalls) > 0 {
+		message.ToolCalls = toolCalls
+	}
+
+	result.Choices = []model.Choice{{
+		Index:        0,
+		Message:      message,
+		FinishReason: anthropicModel.ConvertStopReason(lo.ToPtr(string(msg.StopReason))),
+	}}
+
+	u := msg.Usage
+	if u.InputTokens > 0 || u.OutputTokens > 0 {
+		usage := &model.Usage{
+			PromptTokens:             u.InputTokens,
+			CompletionTokens:         u.OutputTokens,
+			TotalTokens:              u.InputTokens + u.OutputTokens,
+			CacheCreationInputTokens: u.CacheCreationInputTokens,
+			AnthropicUsage:           true,
+		}
+		if u.CacheReadInputTokens > 0 {
+			usage.PromptTokensDetails = &model.PromptTokensDetails{
+				CachedTokens: u.CacheReadInputTokens,
+			}
+		}
+		result.Usage = usage
+	}
+
+	if raw, err := json.Marshal(result); err == nil {
+		result.RawResponse = raw
+		result.RawResponseFormat = model.APIFormatAnthropicMessage
+	}
+	return result
+}
 func convertToAnthropicRequest(req *model.InternalLLMRequest) *anthropicModel.MessageRequest {
 	result := &anthropicModel.MessageRequest{
 		Model:       req.Model,
@@ -814,132 +916,6 @@ func getThinkingBudget(effort string, budget *int64) *int64 {
 		result = 8192
 	}
 	return &result
-}
-
-// Response conversion functions
-
-func convertToLLMResponse(resp *anthropicModel.Message) *model.InternalLLMResponse {
-	if resp == nil {
-		return &model.InternalLLMResponse{
-			Object: "chat.completion",
-		}
-	}
-
-	result := &model.InternalLLMResponse{
-		ID:      resp.ID,
-		Object:  "chat.completion",
-		Model:   resp.Model,
-		Created: 0,
-	}
-
-	var (
-		content           model.MessageContent
-		thinkingText      *string
-		thinkingSignature *string
-		toolCalls         []model.ToolCall
-		textParts         []string
-	)
-
-	for _, block := range resp.Content {
-		switch block.Type {
-		case "text":
-			if block.Text != nil && *block.Text != "" {
-				textParts = append(textParts, *block.Text)
-				content.MultipleContent = append(content.MultipleContent, model.MessageContentPart{
-					Type: "text",
-					Text: block.Text,
-				})
-			}
-		case "tool_use":
-			if block.ID != "" && block.Name != nil {
-				input := "{}"
-				if len(block.Input) > 0 {
-					input = string(block.Input)
-				}
-				toolCalls = append(toolCalls, model.ToolCall{
-					ID:   block.ID,
-					Type: "function",
-					Function: model.FunctionCall{
-						Name:      *block.Name,
-						Arguments: input,
-					},
-				})
-			}
-		case "thinking":
-			if block.Thinking != nil {
-				thinkingText = block.Thinking
-			}
-			thinkingSignature = block.Signature
-		}
-	}
-
-	// If we only have text content, use simple string format
-	if len(textParts) > 0 && len(content.MultipleContent) == len(textParts) {
-		allText := strings.Join(textParts, "")
-		content.Content = &allText
-		content.MultipleContent = nil
-	}
-
-	message := &model.Message{
-		Role:               resp.Role,
-		Content:            content,
-		ToolCalls:          toolCalls,
-		ReasoningContent:   thinkingText,
-		ReasoningSignature: thinkingSignature,
-	}
-
-	choice := model.Choice{
-		Index:        0,
-		Message:      message,
-		FinishReason: convertStopReason(resp.StopReason),
-	}
-
-	result.Choices = []model.Choice{choice}
-	result.Usage = convertAnthropicUsage(resp.Usage)
-
-	return result
-}
-
-func convertStopReason(stopReason *string) *string {
-	if stopReason == nil {
-		return nil
-	}
-
-	switch *stopReason {
-	case "end_turn":
-		return lo.ToPtr("stop")
-	case "max_tokens":
-		return lo.ToPtr("length")
-	case "stop_sequence", "pause_turn":
-		return lo.ToPtr("stop")
-	case "tool_use":
-		return lo.ToPtr("tool_calls")
-	case "refusal":
-		return lo.ToPtr("content_filter")
-	default:
-		return stopReason
-	}
-}
-
-func convertAnthropicUsage(usage *anthropicModel.Usage) *model.Usage {
-	if usage == nil {
-		return nil
-	}
-
-	result := &model.Usage{
-		PromptTokens:             usage.InputTokens,
-		CompletionTokens:         usage.OutputTokens,
-		TotalTokens:              usage.InputTokens + usage.OutputTokens + usage.CacheReadInputTokens + usage.CacheCreationInputTokens,
-		CacheCreationInputTokens: usage.CacheCreationInputTokens,
-		AnthropicUsage:           true,
-	}
-
-	if usage.CacheReadInputTokens > 0 {
-		result.PromptTokensDetails = &model.PromptTokensDetails{
-			CachedTokens: usage.CacheReadInputTokens,
-		}
-	}
-	return result
 }
 
 // patchAnthropicRequest replaces the model field in a raw Anthropic request body.

@@ -27,6 +27,9 @@ const (
 	RequestKindChat        RequestKind = "chat"
 	RequestKindEmbedding   RequestKind = "embedding"
 	RequestKindPassthrough RequestKind = "passthrough"
+	// RequestKindSidecar is for sub-paths of known protocol endpoints (e.g. /messages/count_tokens).
+	// Requests are forwarded as same-format passthrough; failures are logged but never trip the circuit breaker.
+	RequestKindSidecar RequestKind = "sidecar"
 
 	ResponseStatusComplete ResponseStatus = "complete"
 	ResponseStatusPartial  ResponseStatus = "partial"

@@ -10,9 +10,11 @@ import (
 	"net/url"
 	"strings"
 
+	openai "github.com/openai/openai-go/v3"
+	"github.com/openai/openai-go/v3/packages/ssestream"
+
 	"github.com/bestruirui/octopus/internal/transformer/model"
 )
-
 type ChatOutbound struct{}
 
 func (o *ChatOutbound) TargetFormat() model.APIFormat {
@@ -116,4 +118,87 @@ func (o *ChatOutbound) TransformStream(ctx context.Context, eventData []byte) (*
 	resp.RawResponse = eventData
 	resp.RawResponseFormat = model.APIFormatOpenAIChatCompletion
 	return &resp, nil
+}
+
+func (o *ChatOutbound) ReconstructFromRawSSE(ctx context.Context, rawBytes []byte) (*model.InternalLLMResponse, error) {
+	decoder := ssestream.NewDecoder(&http.Response{Body: io.NopCloser(bytes.NewReader(rawBytes))})
+	stream := ssestream.NewStream[openai.ChatCompletionChunk](decoder, nil)
+
+	var acc openai.ChatCompletionAccumulator
+	for stream.Next() {
+		acc.AddChunk(stream.Current())
+	}
+	if err := stream.Err(); err != nil {
+		return nil, fmt.Errorf("stream error: %w", err)
+	}
+	if acc.ID == "" && len(acc.Choices) == 0 {
+		return nil, nil
+	}
+	return convertSDKChatCompletion(&acc.ChatCompletion), nil
+}
+
+func convertSDKChatCompletion(comp *openai.ChatCompletion) *model.InternalLLMResponse {
+	result := &model.InternalLLMResponse{
+		ID:      comp.ID,
+		Object:  "chat.completion",
+		Model:   comp.Model,
+		Created: comp.Created,
+	}
+
+	choices := make([]model.Choice, 0, len(comp.Choices))
+	for _, c := range comp.Choices {
+		msg := &model.Message{Role: "assistant"}
+		if c.Message.Content != "" {
+			msg.Content = model.MessageContent{Content: &c.Message.Content}
+		}
+		for _, tc := range c.Message.ToolCalls {
+			if ftc, ok := tc.AsAny().(openai.ChatCompletionMessageFunctionToolCall); ok {
+				msg.ToolCalls = append(msg.ToolCalls, model.ToolCall{
+					ID:   ftc.ID,
+					Type: "function",
+					Function: model.FunctionCall{
+						Name:      ftc.Function.Name,
+						Arguments: ftc.Function.Arguments,
+					},
+				})
+			}
+		}
+		var fr *string
+		if c.FinishReason != "" {
+			s := c.FinishReason
+			fr = &s
+		}
+		choices = append(choices, model.Choice{
+			Index:        int(c.Index),
+			Message:      msg,
+			FinishReason: fr,
+		})
+	}
+	result.Choices = choices
+
+	u := comp.Usage
+	if u.TotalTokens > 0 || u.PromptTokens > 0 || u.CompletionTokens > 0 {
+		usage := &model.Usage{
+			PromptTokens:     u.PromptTokens,
+			CompletionTokens: u.CompletionTokens,
+			TotalTokens:      u.TotalTokens,
+		}
+		if u.PromptTokensDetails.CachedTokens > 0 {
+			usage.PromptTokensDetails = &model.PromptTokensDetails{
+				CachedTokens: u.PromptTokensDetails.CachedTokens,
+			}
+		}
+		if u.CompletionTokensDetails.ReasoningTokens > 0 {
+			usage.CompletionTokensDetails = &model.CompletionTokensDetails{
+				ReasoningTokens: u.CompletionTokensDetails.ReasoningTokens,
+			}
+		}
+		result.Usage = usage
+	}
+
+	if raw, err := json.Marshal(result); err == nil {
+		result.RawResponse = raw
+		result.RawResponseFormat = model.APIFormatOpenAIChatCompletion
+	}
+	return result
 }

@@ -1,6 +1,24 @@
 package openai
 
-import "encoding/json"
+import (
+	"bufio"
+	"bytes"
+	"encoding/json"
+	"strings"
+)
+
+// parseSSEDataLines extracts the payload from each "data: ..." line in raw SSE bytes.
+func parseSSEDataLines(rawSSE []byte) [][]byte {
+	var out [][]byte
+	scanner := bufio.NewScanner(bytes.NewReader(rawSSE))
+	for scanner.Scan() {
+		line := scanner.Text()
+		if strings.HasPrefix(line, "data: ") {
+			out = append(out, []byte(strings.TrimPrefix(line, "data: ")))
+		}
+	}
+	return out
+}
 
 // patchRawRequest applies targeted patches to a raw JSON request body without full deserialization:
 //   - replaces the "model" field when targetModel differs from the body's value (enables model aliasing)

@@ -125,6 +125,10 @@ func finalChannel(attempts []model.ChannelAttempt) (int, string) {
 }
 
 func (m *RelayMetrics) saveLog(ctx context.Context, err error, duration time.Duration, attempts []model.ChannelAttempt, channelID int, channelName string) {
+	// Don't flood relay_log with failed sidecar sub-path probes (e.g. count_tokens).
+	if err != nil && m.ProbedRequest != nil && m.ProbedRequest.RequestKind == transformerModel.RequestKindSidecar {
+		return
+	}
 	actualModel := m.ActualModel
 	if actualModel == "" {
 		actualModel = m.RequestModel

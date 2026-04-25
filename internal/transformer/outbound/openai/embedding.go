@@ -128,3 +128,7 @@ func (o *EmbeddingOutbound) TransformStream(ctx context.Context, eventData []byt
 	// Embedding API does not support streaming
 	return nil, errors.New("streaming is not supported for embedding API")
 }
+
+func (o *EmbeddingOutbound) ReconstructFromRawSSE(ctx context.Context, rawBytes []byte) (*model.InternalLLMResponse, error) {
+	return nil, nil
+}

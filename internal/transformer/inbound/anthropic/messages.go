@@ -1008,50 +1008,33 @@ func (i *MessagesInbound) GetInternalResponse(ctx context.Context) (*model.Inter
 	// Clear stored chunks after aggregation
 	i.streamChunks = nil
 
-	// Marshal aggregated result as RawResponse for logging
-	if raw, err := json.Marshal(result); err == nil {
+	// Marshal reconstructed Anthropic Message JSON as RawResponse for logging.
+	if raw, err := json.Marshal(ConvertFromLLMResponse(result)); err == nil {
 		result.RawResponse = raw
+		result.RawResponseFormat = model.APIFormatAnthropicMessage
 	}
 
 	return result, nil
 }
 
 // extractPassthroughResponse reconstructs a complete InternalLLMResponse from raw
-// Anthropic SSE chunks. The reassembled Message is JSON-marshaled into RawResponse
-// for logging; Usage is extracted inline for billing.
+// Anthropic SSE chunks by reassembling them into a Message and converting via
+// ConvertToLLMResponse so all fields (choices, usage, thinking, tool_use) are populated.
 func (i *MessagesInbound) extractPassthroughResponse() (*model.InternalLLMResponse, error) {
-	msg := reconstructMessageFromSSE(i.streamChunks)
+	msg := ReconstructMessageFromSSE(i.streamChunks)
 	i.streamChunks = nil
 
-	result := &model.InternalLLMResponse{
-		ID:     msg.ID,
-		Object: "chat.completion",
-		Model:  msg.Model,
-	}
+	result := ConvertToLLMResponse(msg)
 	if raw, err := json.Marshal(msg); err == nil {
 		result.RawResponse = raw
-	}
-	if u := msg.Usage; u != nil {
-		usage := &model.Usage{
-			PromptTokens:             u.InputTokens,
-			CompletionTokens:         u.OutputTokens,
-			TotalTokens:              u.InputTokens + u.OutputTokens + u.CacheReadInputTokens + u.CacheCreationInputTokens,
-			CacheCreationInputTokens: u.CacheCreationInputTokens,
-			AnthropicUsage:           true,
-		}
-		if u.CacheReadInputTokens > 0 {
-			usage.PromptTokensDetails = &model.PromptTokensDetails{
-				CachedTokens: u.CacheReadInputTokens,
-			}
-		}
-		result.Usage = usage
+		result.RawResponseFormat = model.APIFormatAnthropicMessage
 	}
 	return result, nil
 }
 
-// reconstructMessageFromSSE builds a complete anthropic.Message from a slice of raw SSE
+// ReconstructMessageFromSSE builds a complete anthropic.Message from a slice of raw SSE
 // chunks, handling text, thinking, and tool_use content blocks.
-func reconstructMessageFromSSE(chunks []*model.InternalLLMResponse) *Message {
+func ReconstructMessageFromSSE(chunks []*model.InternalLLMResponse) *Message {
 	msg := &Message{Role: "assistant"}
 
 	type blockState struct {

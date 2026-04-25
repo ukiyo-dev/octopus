@@ -36,6 +36,11 @@ type Outbound interface {
 
 	// 将出站流式转为内部通用流式响应格式
 	TransformStream(ctx context.Context, eventData []byte) (*InternalLLMResponse, error)
+
+	// ReconstructFromRawSSE rebuilds a complete InternalLLMResponse from the raw upstream SSE
+	// bytes collected via TeeReader during streaming. Used for logging and metrics after the
+	// stream ends. Returns nil, nil when the bytes are insufficient or unsupported.
+	ReconstructFromRawSSE(ctx context.Context, rawBytes []byte) (*InternalLLMResponse, error)
 }
 
 /*

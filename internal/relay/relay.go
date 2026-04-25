@@ -130,6 +130,10 @@ func Handler(inboundType inbound.InboundType, c *gin.Context) {
 			iter.Skip(channel.ID, usedKey.ID, channel.Name, "channel type not compatible with passthrough request")
 			continue
 		}
+		if probedRequest.RequestKind == model.RequestKindSidecar && outAdapter.TargetFormat() != probedRequest.InboundFormat {
+			iter.Skip(channel.ID, usedKey.ID, channel.Name, "channel format incompatible with sidecar sub-path")
+			continue
+		}
 
 		log.Infof("request model %s, mode: %d, forwarding to channel: %s model: %s (attempt %d/%d, sticky=%t)",
 			requestModel, group.Mode, channel.Name, item.ModelName,
@@ -186,10 +190,12 @@ func (ra *relayAttempt) attempt() attemptResult {
 			RequestSuccess: 1,
 		})
 
-		// 熔断器：记录成功
-		balancer.RecordSuccess(ra.channel.ID, ra.usedKey.ID, ra.attemptModel())
-		// 会话保持：更新粘性记录
-		balancer.SetSticky(ra.apiKeyID, ra.requestModel, ra.channel.ID, ra.usedKey.ID)
+		// 熔断器：记录成功；会话保持：更新粘性记录
+		// Sidecar sub-paths don't affect circuit breaker or sticky sessions.
+		if ra.probedRequest.RequestKind != model.RequestKindSidecar {
+			balancer.RecordSuccess(ra.channel.ID, ra.usedKey.ID, ra.attemptModel())
+			balancer.SetSticky(ra.apiKeyID, ra.requestModel, ra.channel.ID, ra.usedKey.ID)
+		}
 
 		return attemptResult{Success: true}
 	}
@@ -204,8 +210,10 @@ func (ra *relayAttempt) attempt() attemptResult {
 		RequestFailed: 1,
 	})
 
-	// 熔断器：记录失败
-	balancer.RecordFailure(ra.channel.ID, ra.usedKey.ID, ra.attemptModel())
+	// 熔断器：记录失败（sidecar 子路径不触发熔断）
+	if ra.probedRequest.RequestKind != model.RequestKindSidecar {
+		balancer.RecordFailure(ra.channel.ID, ra.usedKey.ID, ra.attemptModel())
+	}
 
 	written := ra.c.Writer.Written()
 	if written {
@@ -239,6 +247,12 @@ func parseRequest(inboundType inbound.InboundType, c *gin.Context) (*model.Probe
 	// Store path suffix (after /v1) for URL passthrough in same-protocol relay
 	probedRequest.RawPath = strings.TrimPrefix(c.Request.URL.Path, "/v1")
 
+	// Sub-paths of known protocol endpoints are sidecar: same-format passthrough,
+	// errors are logged but never trip the circuit breaker.
+	if isSidecarPath(inboundType, probedRequest.RawPath) {
+		probedRequest.RequestKind = model.RequestKindSidecar
+	}
+
 	if probedRequest.Model == "" {
 		err = fmt.Errorf("model is required")
 		resp.Error(c, http.StatusForbidden, err.Error())
@@ -255,6 +269,21 @@ func isPassthroughChannelType(channelType outbound.OutboundType) bool {
 	default:
 		return false
 	}
+}
+
+// isSidecarPath returns true when the request targets a sub-path of a known protocol endpoint.
+func isSidecarPath(inboundType inbound.InboundType, rawPath string) bool {
+	switch inboundType {
+	case inbound.InboundTypeAnthropic:
+		return rawPath != "/messages"
+	case inbound.InboundTypeOpenAIResponse:
+		return rawPath != "/responses"
+	case inbound.InboundTypeOpenAIChat:
+		return rawPath != "/chat/completions"
+	case inbound.InboundTypeOpenAIEmbedding:
+		return rawPath != "/embeddings"
+	}
+	return false
 }
 
 func (ra *relayAttempt) buildInternalRequest(ctx context.Context) (*model.InternalLLMRequest, error) {
@@ -350,8 +379,8 @@ func (ra *relayAttempt) forward() (int, error) {
 	// 处理响应
 	isSSE := strings.Contains(strings.ToLower(response.Header.Get("Content-Type")), "text/event-stream")
 	if ra.probedRequest.Stream || isSSE {
-		if collector, ok := ra.inAdapter.(rawStreamCollector); ok {
-			if err := ra.handleRawStream(ctx, response, collector); err != nil {
+		if ra.probedRequest.RequestKind == model.RequestKindPassthrough {
+			if err := ra.handleRawStream(ctx, response); err != nil {
 				return 0, err
 			}
 			return response.StatusCode, nil
@@ -401,15 +430,9 @@ func (ra *relayAttempt) sendRequest(req *http.Request) (*http.Response, error) {
 	return response, nil
 }
 
-// rawStreamCollector is implemented by inbound adapters that want to receive the
-// full raw SSE bytes after the stream ends (for post-stream usage extraction).
-type rawStreamCollector interface {
-	CollectRawStream(data []byte)
-}
-
 // handleRawStream pipes upstream SSE bytes directly to the client without
-// any transformation, while collecting them via TeeReader for post-stream usage.
-func (ra *relayAttempt) handleRawStream(ctx context.Context, response *http.Response, collector rawStreamCollector) error {
+// any transformation, while collecting them via TeeReader for post-stream reconstruction.
+func (ra *relayAttempt) handleRawStream(ctx context.Context, response *http.Response) error {
 	ra.c.Header("Content-Type", "text/event-stream")
 	ra.c.Header("Cache-Control", "no-cache")
 	ra.c.Header("Connection", "keep-alive")
@@ -458,7 +481,7 @@ func (ra *relayAttempt) handleRawStream(ctx context.Context, response *http.Resp
 		select {
 		case <-ctx.Done():
 			log.Infof("client disconnected, stopping raw stream")
-			collector.CollectRawStream(buf.Bytes())
+			ra.rawUpstreamSSE = buf.Bytes()
 			return ctx.Err()
 		case <-firstTokenC:
 			log.Warnf("first token timeout (%ds), switching channel", ra.firstTokenTimeOutSec)
@@ -467,12 +490,12 @@ func (ra *relayAttempt) handleRawStream(ctx context.Context, response *http.Resp
 		case r, ok := <-results:
 			if !ok {
 				log.Infof("raw stream end")
-				collector.CollectRawStream(buf.Bytes())
+				ra.rawUpstreamSSE = buf.Bytes()
 				return nil
 			}
 			if r.err != nil {
 				log.Warnf("failed to read raw stream: %v", r.err)
-				collector.CollectRawStream(buf.Bytes())
+				ra.rawUpstreamSSE = buf.Bytes()
 				return fmt.Errorf("failed to read raw stream: %w", r.err)
 			}
 			if firstToken {
@@ -511,6 +534,10 @@ func (ra *relayAttempt) handleStreamResponse(ctx context.Context, response *http
 
 	firstToken := true
 
+	// Collect raw upstream bytes via TeeReader for post-stream reconstruction.
+	var rawBuf bytes.Buffer
+	teeBody := io.TeeReader(response.Body, &rawBuf)
+
 	type sseReadResult struct {
 		data string
 		err  error
@@ -519,7 +546,7 @@ func (ra *relayAttempt) handleStreamResponse(ctx context.Context, response *http
 	go func() {
 		defer close(results)
 		readCfg := &sse.ReadConfig{MaxEventSize: maxSSEEventSize}
-		for ev, err := range sse.Read(response.Body, readCfg) {
+		for ev, err := range sse.Read(teeBody, readCfg) {
 			if err != nil {
 				results <- sseReadResult{err: err}
 				return
@@ -552,10 +579,12 @@ func (ra *relayAttempt) handleStreamResponse(ctx context.Context, response *http
 		case r, ok := <-results:
 			if !ok {
 				log.Infof("stream end")
+				ra.rawUpstreamSSE = rawBuf.Bytes()
 				return nil
 			}
 			if r.err != nil {
 				log.Warnf("failed to read event: %v", r.err)
+				ra.rawUpstreamSSE = rawBuf.Bytes()
 				return fmt.Errorf("failed to read stream event: %w", r.err)
 			}
 
@@ -627,13 +656,26 @@ func (ra *relayAttempt) handleResponse(ctx context.Context, response *http.Respo
 
 // collectResponse 收集响应信息
 func (ra *relayAttempt) collectResponse(status model.ResponseStatus) {
-	internalResponse, err := ra.inAdapter.GetInternalResponse(ra.c.Request.Context())
+	ctx := ra.c.Request.Context()
+
+	// Primary: reconstruct from raw upstream SSE bytes (more complete and reliable).
+	if len(ra.rawUpstreamSSE) > 0 {
+		if result, err := ra.outAdapter.ReconstructFromRawSSE(ctx, ra.rawUpstreamSSE); err == nil && result != nil {
+			if result.ResponseStatus == "" {
+				result.ResponseStatus = status
+			}
+			ra.metrics.SetInternalResponse(result, ra.attemptModel())
+			return
+		}
+	}
+
+	// Fallback: inbound adapter's per-chunk accumulation path.
+	internalResponse, err := ra.inAdapter.GetInternalResponse(ctx)
 	if err != nil || internalResponse == nil {
 		return
 	}
 	if internalResponse.ResponseStatus == "" {
 		internalResponse.ResponseStatus = status
 	}
-
 	ra.metrics.SetInternalResponse(internalResponse, ra.attemptModel())
 }

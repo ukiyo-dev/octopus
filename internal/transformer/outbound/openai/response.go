@@ -297,6 +297,27 @@ func (o *ResponseOutbound) TransformStream(ctx context.Context, eventData []byte
 	return resp, nil
 }
 
+func (o *ResponseOutbound) ReconstructFromRawSSE(ctx context.Context, rawBytes []byte) (*model.InternalLLMResponse, error) {
+	for _, data := range parseSSEDataLines(rawBytes) {
+		if bytes.HasPrefix(data, []byte("[DONE]")) {
+			continue
+		}
+		var ev ResponsesStreamEvent
+		if err := json.Unmarshal(data, &ev); err != nil {
+			continue
+		}
+		if ev.Type == "response.completed" && ev.Response != nil {
+			result := convertToLLMResponseFromResponses(ev.Response)
+			if raw, err := json.Marshal(ev.Response); err == nil {
+				result.RawResponse = raw
+				result.RawResponseFormat = model.APIFormatOpenAIResponse
+			}
+			return result, nil
+		}
+	}
+	return nil, nil
+}
+
 // ResponsesRequest represents the OpenAI Responses API request format.
 type ResponsesRequest struct {
 	Model             string                `json:"model"`

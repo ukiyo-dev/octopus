@@ -682,68 +682,36 @@ func (i *ResponseInbound) GetInternalResponse(ctx context.Context) (*model.Inter
 		Message: msg,
 	}}
 
-	// If we have the raw response.completed event (passthrough mode), inject the accumulated output into it.
-	// Otherwise, construct the response API object from scratch.
+	responsesResp := convertToResponsesAPIResponse(result)
 	if len(i.completedEventResponse) > 0 {
-		var rawMap map[string]interface{}
-		if err := json.Unmarshal(i.completedEventResponse, &rawMap); err == nil {
-			// Construct the output array from our accumulated text/reasoning/tool calls
-			var outputItems []map[string]interface{}
-
-			if reasoning != "" {
-				outputItems = append(outputItems, map[string]interface{}{
-					"id":     generateItemID(),
-					"type":   "reasoning",
-					"status": "completed",
-					"summary": []map[string]interface{}{
-						{
-							"type": "summary_text",
-							"text": reasoning,
-						},
-					},
-				})
+		var completedResp ResponsesResponse
+		if err := json.Unmarshal(i.completedEventResponse, &completedResp); err == nil {
+			if completedResp.Object != "" {
+				responsesResp.Object = completedResp.Object
 			}
-
-			if len(i.toolCalls) > 0 {
-				for _, tc := range result.Choices[0].Message.ToolCalls {
-					outputItems = append(outputItems, map[string]interface{}{
-						"id":        tc.ID,
-						"type":      "function_call",
-						"call_id":   tc.ID,
-						"name":      tc.Function.Name,
-						"arguments": tc.Function.Arguments,
-						"status":    "completed",
-					})
-				}
+			if completedResp.ID != "" {
+				responsesResp.ID = completedResp.ID
 			}
-
-			if text != "" {
-				outputItems = append(outputItems, map[string]interface{}{
-					"id":     generateItemID(),
-					"type":   "message",
-					"role":   "assistant",
-					"status": "completed",
-					"content": map[string]interface{}{
-						"items": []map[string]interface{}{
-							{
-								"type": "output_text",
-								"text": text,
-							},
-						},
-					},
-				})
+			if completedResp.Model != "" {
+				responsesResp.Model = completedResp.Model
 			}
-
-			rawMap["output"] = outputItems
-			if raw, err := json.Marshal(rawMap); err == nil {
-				result.RawResponse = raw
+			if completedResp.CreatedAt != 0 {
+				responsesResp.CreatedAt = completedResp.CreatedAt
+			}
+			if completedResp.Status != nil {
+				responsesResp.Status = completedResp.Status
+			}
+			if completedResp.Usage != nil {
+				responsesResp.Usage = completedResp.Usage
+			}
+			if completedResp.Error != nil {
+				responsesResp.Error = completedResp.Error
 			}
 		}
-	} else {
-		// Non-passthrough mode: use the standard struct conversion
-		if raw, err := json.Marshal(convertToResponsesAPIResponse(result)); err == nil {
-			result.RawResponse = raw
-		}
+	}
+	if raw, err := json.Marshal(responsesResp); err == nil {
+		result.RawResponse = raw
+		result.RawResponseFormat = model.APIFormatOpenAIResponse
 	}
 
 	i.streamChunks = nil

@@ -72,6 +72,7 @@ type relayAttempt struct {
 	usedKey              dbmodel.ChannelKey
 	firstTokenTimeOutSec int
 	internalRequest      *model.InternalLLMRequest
+	rawUpstreamSSE       []byte // raw SSE bytes from upstream, collected for post-stream reconstruction
 }
 
 // attemptResult 封装单次尝试的结果

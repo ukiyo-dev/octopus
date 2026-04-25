@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"net/http"
+	"strings"
 
 	"github.com/bestruirui/octopus/internal/relay"
 	"github.com/bestruirui/octopus/internal/server/middleware"
@@ -27,16 +28,18 @@ func init() {
 		)
 }
 
-// dispatch routes requests based on path, falling back to passthrough for unknown endpoints.
+// dispatch routes requests based on path. Sub-paths of known protocol endpoints
+// are routed to their parent protocol's inbound adapter (as sidecar passthrough).
 func dispatch(c *gin.Context) {
-	switch c.Param("path") {
-	case "/chat/completions":
+	path := c.Param("path")
+	switch {
+	case path == "/chat/completions":
 		relay.Handler(inbound.InboundTypeOpenAIChat, c)
-	case "/responses":
+	case path == "/responses" || strings.HasPrefix(path, "/responses/"):
 		relay.Handler(inbound.InboundTypeOpenAIResponse, c)
-	case "/messages":
+	case path == "/messages" || strings.HasPrefix(path, "/messages/"):
 		relay.Handler(inbound.InboundTypeAnthropic, c)
-	case "/embeddings":
+	case path == "/embeddings":
 		relay.Handler(inbound.InboundTypeOpenAIEmbedding, c)
 	default:
 		relay.Handler(inbound.InboundTypePassthrough, c)
