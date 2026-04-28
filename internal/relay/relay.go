@@ -126,12 +126,8 @@ func Handler(inboundType inbound.InboundType, c *gin.Context) {
 			iter.Skip(channel.ID, usedKey.ID, channel.Name, "channel type not compatible with chat request")
 			continue
 		}
-		if probedRequest.RequestKind == model.RequestKindPassthrough && !isPassthroughChannelType(channel.Type) {
-			iter.Skip(channel.ID, usedKey.ID, channel.Name, "channel type not compatible with passthrough request")
-			continue
-		}
-		if probedRequest.RequestKind == model.RequestKindSidecar && outAdapter.TargetFormat() != probedRequest.InboundFormat {
-			iter.Skip(channel.ID, usedKey.ID, channel.Name, "channel format incompatible with sidecar sub-path")
+		if probedRequest.RequestKind == model.RequestKindPassthrough && !isCompatiblePassthrough(probedRequest, outAdapter, channel.Type) {
+			iter.Skip(channel.ID, usedKey.ID, channel.Name, "channel not compatible with passthrough request")
 			continue
 		}
 
@@ -191,8 +187,8 @@ func (ra *relayAttempt) attempt() attemptResult {
 		})
 
 		// 熔断器：记录成功；会话保持：更新粘性记录
-		// Sidecar sub-paths don't affect circuit breaker or sticky sessions.
-		if ra.probedRequest.RequestKind != model.RequestKindSidecar {
+		// Passthrough requests (sub-paths and unknown endpoints) don't affect circuit breaker or sticky sessions.
+		if ra.probedRequest.RequestKind != model.RequestKindPassthrough {
 			balancer.RecordSuccess(ra.channel.ID, ra.usedKey.ID, ra.attemptModel())
 			balancer.SetSticky(ra.apiKeyID, ra.requestModel, ra.channel.ID, ra.usedKey.ID)
 		}
@@ -210,8 +206,8 @@ func (ra *relayAttempt) attempt() attemptResult {
 		RequestFailed: 1,
 	})
 
-	// 熔断器：记录失败（sidecar 子路径不触发熔断）
-	if ra.probedRequest.RequestKind != model.RequestKindSidecar {
+	// 熔断器：记录失败（passthrough 不触发熔断）
+	if ra.probedRequest.RequestKind != model.RequestKindPassthrough {
 		balancer.RecordFailure(ra.channel.ID, ra.usedKey.ID, ra.attemptModel())
 	}
 
@@ -250,7 +246,7 @@ func parseRequest(inboundType inbound.InboundType, c *gin.Context) (*model.Probe
 	// Sub-paths of known protocol endpoints are sidecar: same-format passthrough,
 	// errors are logged but never trip the circuit breaker.
 	if isSidecarPath(inboundType, probedRequest.RawPath) {
-		probedRequest.RequestKind = model.RequestKindSidecar
+		probedRequest.RequestKind = model.RequestKindPassthrough
 	}
 
 	if probedRequest.Model == "" {
@@ -262,7 +258,12 @@ func parseRequest(inboundType inbound.InboundType, c *gin.Context) (*model.Probe
 	return probedRequest, inAdapter, nil
 }
 
-func isPassthroughChannelType(channelType outbound.OutboundType) bool {
+// isCompatiblePassthrough checks channel compatibility for passthrough requests.
+// Known-format sub-paths require an exact format match; unknown-format paths allow only OpenAI-compatible channels.
+func isCompatiblePassthrough(req *model.ProbedRequest, outAdapter model.Outbound, channelType outbound.OutboundType) bool {
+	if req.InboundFormat != model.APIFormatPassthrough {
+		return outAdapter.TargetFormat() == req.InboundFormat
+	}
 	switch channelType {
 	case outbound.OutboundTypeOpenAIChat, outbound.OutboundTypeOpenAIResponse, outbound.OutboundTypeOpenAIEmbedding:
 		return true
@@ -355,6 +356,16 @@ func (ra *relayAttempt) forward() (int, error) {
 	if err != nil {
 		log.Warnf("failed to create request: %v", err)
 		return 0, fmt.Errorf("failed to create request: %w", err)
+	}
+
+	// Capture outbound body for relay log before the body is consumed by sendRequest.
+	if outboundRequest.Body != nil {
+		bodyBytes, readErr := io.ReadAll(outboundRequest.Body)
+		_ = outboundRequest.Body.Close()
+		outboundRequest.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+		if readErr == nil {
+			ra.metrics.OutboundRequest = bodyBytes
+		}
 	}
 
 	// 复制请求头
@@ -583,8 +594,12 @@ func (ra *relayAttempt) handleStreamResponse(ctx context.Context, response *http
 				return nil
 			}
 			if r.err != nil {
-				log.Warnf("failed to read event: %v", r.err)
 				ra.rawUpstreamSSE = rawBuf.Bytes()
+				if r.err == sse.ErrUnexpectedEOF {
+					log.Infof("stream ended without trailing newline (normal)")
+					return nil
+				}
+				log.Warnf("failed to read event: %v", r.err)
 				return fmt.Errorf("failed to read stream event: %w", r.err)
 			}
 

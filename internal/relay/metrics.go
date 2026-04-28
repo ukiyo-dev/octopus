@@ -105,8 +105,10 @@ func (m *RelayMetrics) Save(ctx context.Context, success bool, err error, attemp
 		m.Stats.InputCost, m.Stats.OutputCost, m.Stats.InputCost+m.Stats.OutputCost,
 		len(attempts))
 
-	m.saveLog(ctx, err, duration, attempts, channelID, channelName)
-}
+	// Only persist relay log for main protocol endpoints (chat / embedding).
+	if m.ProbedRequest != nil && m.ProbedRequest.RequestKind != transformerModel.RequestKindPassthrough {
+		m.saveLog(ctx, err, duration, attempts, channelID, channelName)
+	}}
 
 func finalChannel(attempts []model.ChannelAttempt) (int, string) {
 	var lastID int
@@ -125,10 +127,6 @@ func finalChannel(attempts []model.ChannelAttempt) (int, string) {
 }
 
 func (m *RelayMetrics) saveLog(ctx context.Context, err error, duration time.Duration, attempts []model.ChannelAttempt, channelID int, channelName string) {
-	// Don't flood relay_log with failed sidecar sub-path probes (e.g. count_tokens).
-	if err != nil && m.ProbedRequest != nil && m.ProbedRequest.RequestKind == transformerModel.RequestKindSidecar {
-		return
-	}
 	actualModel := m.ActualModel
 	if actualModel == "" {
 		actualModel = m.RequestModel
@@ -161,9 +159,10 @@ func (m *RelayMetrics) saveLog(ctx context.Context, err error, duration time.Dur
 		relayLog.Cost = m.Stats.InputCost + m.Stats.OutputCost
 	}
 
-	// 请求内容
+	// 请求内容：用实际模型名替换原始请求中的 model 字段
 	if m.ProbedRequest != nil && len(m.ProbedRequest.RawRequest) > 0 {
-		relayLog.RequestContent = string(m.ProbedRequest.RawRequest)
+		reqBytes := patchModelField(m.ProbedRequest.RawRequest, m.ActualModel)
+		relayLog.RequestContent = string(reqBytes)
 	}
 
 	// 响应内容
@@ -195,6 +194,28 @@ func (m *RelayMetrics) saveLog(ctx context.Context, err error, duration time.Dur
 	if logErr := op.RelayLogAdd(ctx, relayLog); logErr != nil {
 		log.Warnf("failed to save relay log: %v", logErr)
 	}
+}
+
+// patchModelField replaces the "model" field in a JSON request body with actualModel.
+// Returns the original bytes unchanged if patching fails.
+func patchModelField(raw []byte, actualModel string) []byte {
+	if actualModel == "" {
+		return raw
+	}
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &m); err != nil {
+		return raw
+	}
+	modelJSON, err := json.Marshal(actualModel)
+	if err != nil {
+		return raw
+	}
+	m["model"] = modelJSON
+	out, err := json.Marshal(m)
+	if err != nil {
+		return raw
+	}
+	return out
 }
 
 // filterResponseForLog 创建响应的浅拷贝，过滤掉 images、MultipleContent 中的图片数据和 Audio.Data 以减少存储压力

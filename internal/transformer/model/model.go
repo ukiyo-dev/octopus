@@ -26,10 +26,9 @@ const (
 
 	RequestKindChat        RequestKind = "chat"
 	RequestKindEmbedding   RequestKind = "embedding"
+	// RequestKindPassthrough covers both unknown /v1/ paths and sub-paths of known protocol endpoints.
+	// Neither triggers the circuit breaker; logs are written only on success with a known model.
 	RequestKindPassthrough RequestKind = "passthrough"
-	// RequestKindSidecar is for sub-paths of known protocol endpoints (e.g. /messages/count_tokens).
-	// Requests are forwarded as same-format passthrough; failures are logged but never trip the circuit breaker.
-	RequestKindSidecar RequestKind = "sidecar"
 
 	ResponseStatusComplete ResponseStatus = "complete"
 	ResponseStatusPartial  ResponseStatus = "partial"

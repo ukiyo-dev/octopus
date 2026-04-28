@@ -425,7 +425,7 @@ func convertSDKAnthropicMessage(msg *anthropicSDK.Message) *model.InternalLLMRes
 		result.Usage = usage
 	}
 
-	if raw, err := json.Marshal(result); err == nil {
+	if raw, err := json.Marshal(msg); err == nil {
 		result.RawResponse = raw
 		result.RawResponseFormat = model.APIFormatAnthropicMessage
 	}

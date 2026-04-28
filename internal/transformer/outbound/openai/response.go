@@ -259,21 +259,10 @@ func (o *ResponseOutbound) TransformStream(ctx context.Context, eventData []byte
 
 	case "response.completed":
 		if streamEvent.Response != nil {
-			var finishReason *string
-			if streamEvent.Response.Status != nil {
-				switch *streamEvent.Response.Status {
-				case "completed":
-					finishReason = lo.ToPtr("stop")
-				case "incomplete":
-					finishReason = lo.ToPtr("length")
-				case "failed":
-					finishReason = lo.ToPtr("error")
-				}
-			}
 			resp.Choices = []model.Choice{
 				{
 					Index:        0,
-					FinishReason: finishReason,
+					FinishReason: inferFinishReason(streamEvent.Response),
 				},
 			}
 			if streamEvent.Response.Usage != nil {
@@ -298,24 +287,143 @@ func (o *ResponseOutbound) TransformStream(ctx context.Context, eventData []byte
 }
 
 func (o *ResponseOutbound) ReconstructFromRawSSE(ctx context.Context, rawBytes []byte) (*model.InternalLLMResponse, error) {
+	var completedResp *ResponsesResponse
+	var completedRaw json.RawMessage
+	doneItems := map[int]ResponsesItem{}
+	// reasoningByIndex accumulates streaming reasoning text per output_index.
+	reasoningByIndex := map[int]strings.Builder{}
+
 	for _, data := range parseSSEDataLines(rawBytes) {
 		if bytes.HasPrefix(data, []byte("[DONE]")) {
 			continue
 		}
-		var ev ResponsesStreamEvent
+		var ev struct {
+			Type        string          `json:"type"`
+			Response    json.RawMessage `json:"response,omitempty"`
+			Item        *ResponsesItem  `json:"item,omitempty"`
+			OutputIndex int             `json:"output_index"`
+			Delta       string          `json:"delta,omitempty"`
+		}
 		if err := json.Unmarshal(data, &ev); err != nil {
 			continue
 		}
-		if ev.Type == "response.completed" && ev.Response != nil {
-			result := convertToLLMResponseFromResponses(ev.Response)
-			if raw, err := json.Marshal(ev.Response); err == nil {
-				result.RawResponse = raw
-				result.RawResponseFormat = model.APIFormatOpenAIResponse
+		switch ev.Type {
+		case "response.completed":
+			if len(ev.Response) > 0 {
+				var resp ResponsesResponse
+				if err := json.Unmarshal(ev.Response, &resp); err == nil {
+					completedResp = &resp
+					completedRaw = ev.Response
+				}
 			}
-			return result, nil
+		case "response.output_item.done":
+			if ev.Item != nil {
+				doneItems[ev.OutputIndex] = *ev.Item
+			}
+		case "response.reasoning_summary_text.delta":
+			if ev.Delta != "" {
+				sb := reasoningByIndex[ev.OutputIndex]
+				sb.WriteString(ev.Delta)
+				reasoningByIndex[ev.OutputIndex] = sb
+			}
 		}
 	}
-	return nil, nil
+
+	if completedResp == nil {
+		return nil, nil
+	}
+
+	// Some providers omit output items from response.completed; fill from output_item.done events.
+	// In that case we must re-marshal the struct (raw bytes would have empty output).
+	if len(completedResp.Output) == 0 && len(doneItems) > 0 {
+		items := make([]ResponsesItem, 0, len(doneItems))
+		for i := range len(doneItems) {
+			if item, ok := doneItems[i]; ok {
+				items = append(items, item)
+			}
+		}
+		completedResp.Output = items
+		fillReasoningSummaries(completedResp, reasoningByIndex)
+		result := convertToLLMResponseFromResponses(completedResp)
+		if raw, err := json.Marshal(completedResp); err == nil {
+			result.RawResponse = raw
+			result.RawResponseFormat = model.APIFormatOpenAIResponse
+		}
+		return result, nil
+	}
+
+	// Fill reasoning summaries from streaming deltas when the completed event has empty summaries.
+	// If any summaries were patched, re-marshal so the log reflects the complete text.
+	if filled := fillReasoningSummaries(completedResp, reasoningByIndex); filled {
+		result := convertToLLMResponseFromResponses(completedResp)
+		if raw, err := json.Marshal(completedResp); err == nil {
+			result.RawResponse = raw
+			result.RawResponseFormat = model.APIFormatOpenAIResponse
+		}
+		return result, nil
+	}
+
+	// Use original raw response bytes to preserve all provider fields.
+	result := convertToLLMResponseFromResponses(completedResp)
+	result.RawResponse = completedRaw
+	result.RawResponseFormat = model.APIFormatOpenAIResponse
+	return result, nil
+}
+
+// fillReasoningSummaries patches reasoning output items whose Summary is empty
+// using text accumulated from response.reasoning_summary_text.delta events.
+// Returns true if any item was patched.
+func fillReasoningSummaries(resp *ResponsesResponse, byIndex map[int]strings.Builder) bool {
+	if len(byIndex) == 0 {
+		return false
+	}
+	filled := false
+	for i, item := range resp.Output {
+		if item.Type != "reasoning" {
+			continue
+		}
+		sb, ok := byIndex[i]
+		if !ok || sb.Len() == 0 {
+			continue
+		}
+		allEmpty := true
+		for _, s := range item.Summary {
+			if s.Text != "" {
+				allEmpty = false
+				break
+			}
+		}
+		if allEmpty {
+			resp.Output[i].Summary = []ResponsesReasoningSummary{{Type: "summary_text", Text: sb.String()}}
+			filled = true
+		}
+	}
+	return filled
+}
+
+// inferFinishReason determines finish_reason from a completed ResponsesResponse.
+// "tool_calls" takes precedence over status-based mapping.
+func inferFinishReason(resp *ResponsesResponse) *string {
+	if resp == nil {
+		return nil
+	}
+	for _, item := range resp.Output {
+		if item.Type == "function_call" {
+			return lo.ToPtr("tool_calls")
+		}
+	}
+	if resp.Status == nil {
+		return nil
+	}
+	switch *resp.Status {
+	case "completed":
+		return lo.ToPtr("stop")
+	case "incomplete":
+		return lo.ToPtr("length")
+	case "failed":
+		return lo.ToPtr("error")
+	}
+	return nil
 }
 
 // ResponsesRequest represents the OpenAI Responses API request format.
@@ -513,7 +621,6 @@ func ConvertToResponsesRequest(req *model.InternalLLMRequest) *ResponsesRequest 
 		Store:             req.Store,
 		ServiceTier:       req.ServiceTier,
 		User:              req.User,
-		Metadata:          req.Metadata,
 		MaxOutputTokens:   req.MaxCompletionTokens,
 		ParallelToolCalls: req.ParallelToolCalls,
 	}

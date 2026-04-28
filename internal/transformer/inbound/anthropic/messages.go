@@ -1008,12 +1008,6 @@ func (i *MessagesInbound) GetInternalResponse(ctx context.Context) (*model.Inter
 	// Clear stored chunks after aggregation
 	i.streamChunks = nil
 
-	// Marshal reconstructed Anthropic Message JSON as RawResponse for logging.
-	if raw, err := json.Marshal(ConvertFromLLMResponse(result)); err == nil {
-		result.RawResponse = raw
-		result.RawResponseFormat = model.APIFormatAnthropicMessage
-	}
-
 	return result, nil
 }
 

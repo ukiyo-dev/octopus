@@ -1,7 +1,7 @@
 'use client';
 
 import { useMemo, useState, useEffect } from 'react';
-import { Clock, Cpu, Zap, AlertCircle, ArrowDownToLine, ArrowUpFromLine, DollarSign, ArrowRight, ArrowDown, Send, MessageSquare, Loader2, RotateCw, ChevronDown, ChevronUp, Pin, KeyRound } from 'lucide-react';
+import { Clock, Cpu, Zap, AlertCircle, ArrowDownToLine, ArrowUpFromLine, DollarSign, ArrowRight, ArrowDown, ArrowUp, Send, MessageSquare, Loader2, RotateCw, ChevronDown, ChevronUp, Pin, KeyRound } from 'lucide-react';
 import { useTranslations } from 'next-intl';
 import { motion, AnimatePresence } from 'motion/react';
 import JsonView from '@uiw/react-json-view';
@@ -191,6 +191,8 @@ export function LogCard({ log }: { log: RelayLog }) {
         [log.actual_model_name]
     );
     const requestAPIKeyName = useMemo(() => log.request_api_key_name?.trim() ?? '', [log.request_api_key_name]);
+    const cacheReadInputTokens = log.cache_read_input_tokens ?? 0;
+    const cacheWriteInputTokens = log.cache_write_input_tokens ?? 0;
 
     const hasError = !!log.error;
     const hasMultipleAttempts = log.attempts && log.attempts.length > 1;
@@ -235,41 +237,57 @@ export function LogCard({ log }: { log: RelayLog }) {
                                     <Pin className="size-3.5 shrink-0 text-amber-500" />
                                 )}
                             </div>
-                            <div className="grid grid-cols-2 md:grid-cols-7 gap-x-4 gap-y-2 text-xs tabular-nums text-muted-foreground">
+                            <div className="grid grid-cols-2 md:flex md:flex-wrap gap-x-4 gap-y-2 text-xs tabular-nums text-muted-foreground">
                                 <div className="flex items-center gap-1.5">
                                     <Clock className="size-3.5 shrink-0" style={{ color: brandColor }} />
-                                    <span>{formatTime(log.time)}</span>
+                                    <span className="whitespace-nowrap">{formatTime(log.time)}</span>
                                 </div>
                                 {requestAPIKeyName && (
-                                    <div className="flex items-center gap-1.5">
+                                    <div className="flex items-center gap-1.5 min-w-0">
                                         <KeyRound className="size-3.5 shrink-0 text-orange-500" />
-                                        <span className="truncate" title={requestAPIKeyName}>
+                                        <span className="truncate max-w-[120px]" title={requestAPIKeyName}>
                                             {requestAPIKeyName}
                                         </span>
                                     </div>
                                 )}
                                 <div className="flex items-center gap-1.5">
                                     <Zap className="size-3.5 shrink-0 text-amber-500" />
-                                    <span>{t('firstToken')} {formatDuration(log.ftut)}</span>
+                                    <span className="whitespace-nowrap" title={`${t('firstToken')} ${formatDuration(log.ftut)}`}>
+                                        {t('firstToken')} {formatDuration(log.ftut)}
+                                    </span>
                                 </div>
                                 <div className="flex items-center gap-1.5">
                                     <Cpu className="size-3.5 shrink-0 text-blue-500" />
-                                    <span>{t('totalTime')} {formatDuration(log.use_time)}</span>
+                                    <span className="whitespace-nowrap" title={`${t('totalTime')} ${formatDuration(log.use_time)}`}>
+                                        {t('totalTime')} {formatDuration(log.use_time)}
+                                    </span>
                                 </div>
                                 <div className="flex items-center gap-1.5">
                                     <ArrowDownToLine className="size-3.5 shrink-0 text-green-500" />
-                                    <span>{t('input')} {log.input_tokens.toLocaleString()}</span>
+                                    <span className="whitespace-nowrap">{t('input')} {log.input_tokens.toLocaleString()}</span>
                                 </div>
                                 <div className="flex items-center gap-1.5">
                                     <ArrowUpFromLine className="size-3.5 shrink-0 text-purple-500" />
-                                    <span>{t('output')} {log.output_tokens.toLocaleString()}</span>
+                                    <span className="whitespace-nowrap">{t('output')} {log.output_tokens.toLocaleString()}</span>
                                 </div>
                                 <div className="flex items-center gap-1.5">
                                     <DollarSign className="size-3.5 shrink-0 text-emerald-500" />
-                                    <span className="font-medium text-emerald-600 dark:text-emerald-400">
+                                    <span className="font-medium text-emerald-600 dark:text-emerald-400 whitespace-nowrap">
                                         {t('cost')} {Number(log.cost).toFixed(6)}
                                     </span>
                                 </div>
+                                {cacheReadInputTokens > 0 && (
+                                    <div className="flex items-center gap-1.5">
+                                        <ArrowDown className="size-3.5 shrink-0 text-amber-500" />
+                                        <span className="whitespace-nowrap">{t('read')} {cacheReadInputTokens.toLocaleString()}</span>
+                                    </div>
+                                )}
+                                {cacheWriteInputTokens > 0 && (
+                                    <div className="flex items-center gap-1.5">
+                                        <ArrowUp className="size-3.5 shrink-0 text-sky-500" />
+                                        <span className="whitespace-nowrap">{t('write')} {cacheWriteInputTokens.toLocaleString()}</span>
+                                    </div>
+                                )}
                             </div>
                             {hasError && (
                                 <div className="p-2.5 rounded-xl bg-destructive/10 border border-destructive/20 overflow-hidden">
