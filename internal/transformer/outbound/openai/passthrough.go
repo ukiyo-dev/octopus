@@ -8,9 +8,11 @@ import (
 )
 
 // parseSSEDataLines extracts the payload from each "data: ..." line in raw SSE bytes.
+// Uses a 32 MB scanner buffer so that large response.completed events are not dropped.
 func parseSSEDataLines(rawSSE []byte) [][]byte {
 	var out [][]byte
 	scanner := bufio.NewScanner(bytes.NewReader(rawSSE))
+	scanner.Buffer(make([]byte, 64*1024), 32*1024*1024)
 	for scanner.Scan() {
 		line := scanner.Text()
 		if strings.HasPrefix(line, "data: ") {

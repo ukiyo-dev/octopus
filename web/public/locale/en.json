@@ -136,8 +136,10 @@
             "sortByCost": "Cost",
             "sortByCount": "Count",
             "sortByTokens": "Tokens",
+            "sortByCache": "Cache",
             "noData": "No ranking data",
-            "successRate": "Success Rate"
+            "successRate": "Success Rate",
+            "cacheRead": "Cache Read"
         }
     },
     "setting": {
@@ -446,6 +448,9 @@
             "noResponseContent": "(No response content)",
             "firstTokenTime": "First Token Time",
             "tokens": "tokens",
+            "read": "Read",
+            "write": "Write",
+            "tokenBreakdown": "Token Breakdown",
             "retryDetails": "Retry Details",
             "attempts": "attempts",
             "success": "Success",

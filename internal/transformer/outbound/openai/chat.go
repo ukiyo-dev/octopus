@@ -134,7 +134,12 @@ func (o *ChatOutbound) ReconstructFromRawSSE(ctx context.Context, rawBytes []byt
 	if acc.ID == "" && len(acc.Choices) == 0 {
 		return nil, nil
 	}
-	return convertSDKChatCompletion(&acc.ChatCompletion), nil
+	result := convertSDKChatCompletion(&acc.ChatCompletion)
+	if raw, err := json.Marshal(acc.ChatCompletion); err == nil {
+		result.RawResponse = raw
+		result.RawResponseFormat = model.APIFormatOpenAIChatCompletion
+	}
+	return result, nil
 }
 
 func convertSDKChatCompletion(comp *openai.ChatCompletion) *model.InternalLLMResponse {
@@ -196,9 +201,5 @@ func convertSDKChatCompletion(comp *openai.ChatCompletion) *model.InternalLLMRes
 		result.Usage = usage
 	}
 
-	if raw, err := json.Marshal(result); err == nil {
-		result.RawResponse = raw
-		result.RawResponseFormat = model.APIFormatOpenAIChatCompletion
-	}
 	return result
 }

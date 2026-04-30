@@ -136,8 +136,10 @@
             "sortByCost": "金額",
             "sortByCount": "次數",
             "sortByTokens": "Tokens",
+            "sortByCache": "快取",
             "noData": "暫無排行數據",
-            "successRate": "成功率"
+            "successRate": "成功率",
+            "cacheRead": "快取讀取"
         }
     },
     "setting": {
@@ -446,6 +448,9 @@
             "noResponseContent": "(無響應內容)",
             "firstTokenTime": "首字時間",
             "tokens": "tokens",
+            "read": "讀取",
+            "write": "寫入",
+            "tokenBreakdown": "Token 明細",
             "retryDetails": "重試詳情",
             "attempts": "次嘗試",
             "success": "成功",

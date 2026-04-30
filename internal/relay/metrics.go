@@ -25,6 +25,7 @@ type RelayMetrics struct {
 
 	// 请求和响应内容
 	ProbedRequest    *transformerModel.ProbedRequest
+	OutboundRequest  []byte
 	InternalResponse *transformerModel.InternalLLMResponse
 
 	// 统计指标
@@ -54,7 +55,7 @@ func (m *RelayMetrics) SetInternalResponse(resp *transformerModel.InternalLLMRes
 	}
 
 	usage := resp.Usage
-	m.Stats.InputToken = usage.PromptTokens
+	m.Stats.InputToken = effectiveInputTokens(usage)
 	m.Stats.OutputToken = usage.CompletionTokens
 
 	modelPrice := price.GetLLMPrice(actualModel)
@@ -76,6 +77,29 @@ func (m *RelayMetrics) SetInternalResponse(resp *transformerModel.InternalLLMRes
 	m.Stats.OutputCost = float64(usage.CompletionTokens) * modelPrice.Output * 1e-6
 }
 
+func effectiveInputTokens(usage *transformerModel.Usage) int64 {
+	if usage == nil {
+		return 0
+	}
+	if usage.AnthropicUsage {
+		if usage.PromptTokens < 0 {
+			return 0
+		}
+		return usage.PromptTokens
+	}
+
+	cachedTokens := int64(0)
+	if usage.PromptTokensDetails != nil {
+		cachedTokens = usage.PromptTokensDetails.CachedTokens
+	}
+
+	inputTokens := usage.PromptTokens - cachedTokens
+	if inputTokens < 0 {
+		return 0
+	}
+	return inputTokens
+}
+
 func (m *RelayMetrics) Save(ctx context.Context, success bool, err error, attempts []model.ChannelAttempt) {
 	duration := time.Since(m.StartTime)
 
@@ -85,6 +109,12 @@ func (m *RelayMetrics) Save(ctx context.Context, success bool, err error, attemp
 		OutputToken: m.Stats.OutputToken,
 		InputCost:   m.Stats.InputCost,
 		OutputCost:  m.Stats.OutputCost,
+	}
+	if m.InternalResponse != nil && m.InternalResponse.Usage != nil {
+		if m.InternalResponse.Usage.PromptTokensDetails != nil {
+			globalStats.CacheReadInputToken = m.InternalResponse.Usage.PromptTokensDetails.CachedTokens
+		}
+		globalStats.CacheWriteInputToken = m.InternalResponse.Usage.CacheCreationInputTokens
 	}
 	if success {
 		globalStats.RequestSuccess = 1
@@ -108,7 +138,8 @@ func (m *RelayMetrics) Save(ctx context.Context, success bool, err error, attemp
 	// Only persist relay log for main protocol endpoints (chat / embedding).
 	if m.ProbedRequest != nil && m.ProbedRequest.RequestKind != transformerModel.RequestKindPassthrough {
 		m.saveLog(ctx, err, duration, attempts, channelID, channelName)
-	}}
+	}
+}
 
 func finalChannel(attempts []model.ChannelAttempt) (int, string) {
 	var lastID int
@@ -154,15 +185,18 @@ func (m *RelayMetrics) saveLog(ctx context.Context, err error, duration time.Dur
 
 	// Usage
 	if m.InternalResponse != nil && m.InternalResponse.Usage != nil {
-		relayLog.InputTokens = int(m.InternalResponse.Usage.PromptTokens)
+		relayLog.InputTokens = int(effectiveInputTokens(m.InternalResponse.Usage))
+		if m.InternalResponse.Usage.PromptTokensDetails != nil {
+			relayLog.CacheReadInputTokens = int(m.InternalResponse.Usage.PromptTokensDetails.CachedTokens)
+		}
+		relayLog.CacheWriteInputTokens = int(m.InternalResponse.Usage.CacheCreationInputTokens)
 		relayLog.OutputTokens = int(m.InternalResponse.Usage.CompletionTokens)
 		relayLog.Cost = m.Stats.InputCost + m.Stats.OutputCost
 	}
 
-	// 请求内容：用实际模型名替换原始请求中的 model 字段
-	if m.ProbedRequest != nil && len(m.ProbedRequest.RawRequest) > 0 {
-		reqBytes := patchModelField(m.ProbedRequest.RawRequest, m.ActualModel)
-		relayLog.RequestContent = string(reqBytes)
+	// 请求内容：发给上游的实际请求体（转换后或 patch 后）
+	if len(m.OutboundRequest) > 0 {
+		relayLog.RequestContent = string(m.OutboundRequest)
 	}
 
 	// 响应内容
@@ -176,9 +210,17 @@ func (m *RelayMetrics) saveLog(ctx context.Context, err error, duration time.Dur
 			respForLog := m.filterResponseForLog(m.InternalResponse)
 			if respJSON, jsonErr := json.Marshal(respForLog); jsonErr == nil {
 				if m.InternalResponse.Usage != nil && m.InternalResponse.Usage.AnthropicUsage {
+					cacheReadInputTokens := int64(0)
+					if m.InternalResponse.Usage.PromptTokensDetails != nil {
+						cacheReadInputTokens = m.InternalResponse.Usage.PromptTokensDetails.CachedTokens
+					}
 					respStr := string(respJSON)
 					old := `"usage":{`
-					insert := fmt.Sprintf(`"usage":{"cache_creation_input_tokens":%d,`, m.InternalResponse.Usage.CacheCreationInputTokens)
+					insert := fmt.Sprintf(
+						`"usage":{"cache_creation_input_tokens":%d,"cache_read_input_tokens":%d,`,
+						m.InternalResponse.Usage.CacheCreationInputTokens,
+						cacheReadInputTokens,
+					)
 					respJSON = []byte(strings.Replace(respStr, old, insert, 1))
 				}
 				relayLog.ResponseContent = string(respJSON)
@@ -194,28 +236,6 @@ func (m *RelayMetrics) saveLog(ctx context.Context, err error, duration time.Dur
 	if logErr := op.RelayLogAdd(ctx, relayLog); logErr != nil {
 		log.Warnf("failed to save relay log: %v", logErr)
 	}
-}
-
-// patchModelField replaces the "model" field in a JSON request body with actualModel.
-// Returns the original bytes unchanged if patching fails.
-func patchModelField(raw []byte, actualModel string) []byte {
-	if actualModel == "" {
-		return raw
-	}
-	var m map[string]json.RawMessage
-	if err := json.Unmarshal(raw, &m); err != nil {
-		return raw
-	}
-	modelJSON, err := json.Marshal(actualModel)
-	if err != nil {
-		return raw
-	}
-	m["model"] = modelJSON
-	out, err := json.Marshal(m)
-	if err != nil {
-		return raw
-	}
-	return out
 }
 
 // filterResponseForLog 创建响应的浅拷贝，过滤掉 images、MultipleContent 中的图片数据和 Audio.Data 以减少存储压力

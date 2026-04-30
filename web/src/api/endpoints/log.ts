@@ -36,6 +36,8 @@ export interface RelayLog {
     channel_name: string;        // 渠道名称
     actual_model_name: string;   // 实际使用模型名称
     input_tokens: number;        // 输入Token
+    cache_read_input_tokens: number;   // 缓存读取Token
+    cache_write_input_tokens: number;  // 缓存写入Token
     output_tokens: number;       // 输出Token
     ftut: number;                // 首字时间(毫秒)
     use_time: number;            // 总用时(毫秒)

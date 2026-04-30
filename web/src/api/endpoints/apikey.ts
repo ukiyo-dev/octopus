@@ -64,7 +64,12 @@ export function useAPIKeyDashboardStats() {
             stats: {
                 api_key_id: data.stats.api_key_id,
                 input_token: formatCount(data.stats.input_token),
+                cache_read_input_token: formatCount(data.stats.cache_read_input_token),
+                cache_write_input_token: formatCount(data.stats.cache_write_input_token),
                 output_token: formatCount(data.stats.output_token),
+                cache_utilization: data.stats.input_token + data.stats.cache_read_input_token > 0
+                    ? (data.stats.cache_read_input_token / (data.stats.input_token + data.stats.cache_read_input_token)) * 100
+                    : 0,
                 total_token: formatCount(data.stats.input_token + data.stats.output_token),
                 input_cost: formatMoney(data.stats.input_cost),
                 output_cost: formatMoney(data.stats.output_cost),
@@ -210,7 +215,12 @@ export function useAPIKeyStats() {
         select: (data): StatsAPIKeyFormatted => ({
             api_key_id: data.api_key_id,
             input_token: formatCount(data.input_token),
+            cache_read_input_token: formatCount(data.cache_read_input_token),
+            cache_write_input_token: formatCount(data.cache_write_input_token),
             output_token: formatCount(data.output_token),
+            cache_utilization: data.input_token + data.cache_read_input_token > 0
+                ? (data.cache_read_input_token / (data.input_token + data.cache_read_input_token)) * 100
+                : 0,
             total_token: formatCount(data.input_token + data.output_token),
             input_cost: formatMoney(data.input_cost),
             output_cost: formatMoney(data.output_cost),

@@ -156,7 +156,12 @@ export function useChannelList() {
             }) satisfies Channel,
             formatted: {
                 input_token: formatCount(item.stats.input_token),
+                cache_read_input_token: formatCount(item.stats.cache_read_input_token),
+                cache_write_input_token: formatCount(item.stats.cache_write_input_token),
                 output_token: formatCount(item.stats.output_token),
+                cache_utilization: item.stats.input_token + item.stats.cache_read_input_token > 0
+                    ? (item.stats.cache_read_input_token / (item.stats.input_token + item.stats.cache_read_input_token)) * 100
+                    : 0,
                 total_token: formatCount(item.stats.input_token + item.stats.output_token),
                 input_cost: formatMoney(item.stats.input_cost),
                 output_cost: formatMoney(item.stats.output_cost),

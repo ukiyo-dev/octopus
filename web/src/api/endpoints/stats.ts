@@ -7,6 +7,8 @@ import { formatCount, formatMoney, formatTime } from '@/lib/utils';
  */
 interface StatsMetrics {
     input_token: number;
+    cache_read_input_token: number;
+    cache_write_input_token: number;
     output_token: number;
     input_cost: number;
     output_cost: number;
@@ -17,6 +19,8 @@ interface StatsMetrics {
 
 export interface StatsMetricsFormatted {
     input_token: ReturnType<typeof formatCount>;
+    cache_read_input_token: ReturnType<typeof formatCount>;
+    cache_write_input_token: ReturnType<typeof formatCount>;
     output_token: ReturnType<typeof formatCount>;
     input_cost: ReturnType<typeof formatMoney>;
     output_cost: ReturnType<typeof formatMoney>;
@@ -24,6 +28,7 @@ export interface StatsMetricsFormatted {
     request_success: ReturnType<typeof formatCount>;
     request_failed: ReturnType<typeof formatCount>;
 
+    cache_utilization: number;
     request_count: ReturnType<typeof formatCount>;
     total_token: ReturnType<typeof formatCount>;
     total_cost: ReturnType<typeof formatMoney>;
@@ -88,7 +93,12 @@ export function useStatsDaily() {
         },
         select: (data) => data.map((item): StatsDailyFormatted => ({
             input_token: formatCount(item.input_token),
+            cache_read_input_token: formatCount(item.cache_read_input_token),
+            cache_write_input_token: formatCount(item.cache_write_input_token),
             output_token: formatCount(item.output_token),
+            cache_utilization: item.input_token + item.cache_read_input_token > 0
+                ? (item.cache_read_input_token / (item.input_token + item.cache_read_input_token)) * 100
+                : 0,
             total_token: formatCount(item.input_token + item.output_token),
             input_cost: formatMoney(item.input_cost),
             output_cost: formatMoney(item.output_cost),
@@ -116,7 +126,12 @@ export function useStatsHourly() {
             hour: item.hour,
             date: item.date,
             input_token: formatCount(item.input_token),
+            cache_read_input_token: formatCount(item.cache_read_input_token),
+            cache_write_input_token: formatCount(item.cache_write_input_token),
             output_token: formatCount(item.output_token),
+            cache_utilization: item.input_token + item.cache_read_input_token > 0
+                ? (item.cache_read_input_token / (item.input_token + item.cache_read_input_token)) * 100
+                : 0,
             total_token: formatCount(item.input_token + item.output_token),
             input_cost: formatMoney(item.input_cost),
             output_cost: formatMoney(item.output_cost),
@@ -139,7 +154,12 @@ export function useStatsTotal() {
         },
         select: (data) => ({
             input_token: formatCount(data.input_token),
+            cache_read_input_token: formatCount(data.cache_read_input_token),
+            cache_write_input_token: formatCount(data.cache_write_input_token),
             output_token: formatCount(data.output_token),
+            cache_utilization: data.input_token + data.cache_read_input_token > 0
+                ? (data.cache_read_input_token / (data.input_token + data.cache_read_input_token)) * 100
+                : 0,
             total_token: formatCount(data.input_token + data.output_token),
             input_cost: formatMoney(data.input_cost),
             output_cost: formatMoney(data.output_cost),
@@ -168,7 +188,12 @@ export function useStatsAPIKey() {
         select: (data) => data.map((item): StatsAPIKeyFormatted => ({
             api_key_id: item.api_key_id,
             input_token: formatCount(item.input_token),
+            cache_read_input_token: formatCount(item.cache_read_input_token),
+            cache_write_input_token: formatCount(item.cache_write_input_token),
             output_token: formatCount(item.output_token),
+            cache_utilization: item.input_token + item.cache_read_input_token > 0
+                ? (item.cache_read_input_token / (item.input_token + item.cache_read_input_token)) * 100
+                : 0,
             total_token: formatCount(item.input_token + item.output_token),
             input_cost: formatMoney(item.input_cost),
             output_cost: formatMoney(item.output_cost),

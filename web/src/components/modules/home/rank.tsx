@@ -30,6 +30,15 @@ export function Rank() {
         return [...channelData].sort((a, b) => b.formatted.total_token.raw - a.formatted.total_token.raw);
     }, [channelData]);
 
+    const rankedByCache = useMemo<ChannelData[]>(() => {
+        if (!channelData) return [];
+        return [...channelData].sort((a, b) => {
+            const utilizationDiff = b.formatted.cache_utilization - a.formatted.cache_utilization;
+            if (utilizationDiff !== 0) return utilizationDiff;
+            return b.formatted.cache_read_input_token.raw - a.formatted.cache_read_input_token.raw;
+        });
+    }, [channelData]);
+
     const getMedalEmoji = (rank: number): string => {
         switch (rank) {
             case 1: return 'T1';
@@ -104,6 +113,16 @@ export function Rank() {
                                             {channel.formatted.total_token.formatted.unit}
                                         </span>
                                     </span>
+                                ) : mode === 'cache' ? (
+                                    <div className="flex flex-col items-end">
+                                        <span className="font-semibold text-base">
+                                            {channel.formatted.cache_utilization.toFixed(1)}%
+                                        </span>
+                                        <span className="text-xs text-muted-foreground">
+                                            {t('cacheRead')}: {channel.formatted.cache_read_input_token.formatted.value}
+                                            {channel.formatted.cache_read_input_token.formatted.unit}
+                                        </span>
+                                    </div>
                                 ) : (
                                     <span className="font-semibold text-base">
                                         {channel.formatted.total_cost.formatted.value}
@@ -129,6 +148,7 @@ export function Rank() {
                         <TabsTrigger value="cost">{t('sortByCost')}</TabsTrigger>
                         <TabsTrigger value="count">{t('sortByCount')}</TabsTrigger>
                         <TabsTrigger value="tokens">{t('sortByTokens')}</TabsTrigger>
+                        <TabsTrigger value="cache">{t('sortByCache')}</TabsTrigger>
                     </TabsList>
                 </div>
                 <TabsContents>
@@ -140,6 +160,9 @@ export function Rank() {
                     </TabsContent>
                     <TabsContent value="tokens">
                         {renderList(rankedByTokens, 'tokens')}
+                    </TabsContent>
+                    <TabsContent value="cache">
+                        {renderList(rankedByCache, 'cache')}
                     </TabsContent>
                 </TabsContents>
             </Tabs>
