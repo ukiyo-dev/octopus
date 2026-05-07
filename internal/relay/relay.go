@@ -131,8 +131,10 @@ func Handler(inboundType inbound.InboundType, c *gin.Context) {
 			continue
 		}
 
-		log.Infof("request model %s, mode: %d, forwarding to channel: %s model: %s (attempt %d/%d, sticky=%t)",
+		log.Infof("request model %s, mode: %d, forwarding to channel: %s model: %s, method=%s, path=%s, raw_path=%s, request_kind=%s, inbound_format=%s, target_format=%s (attempt %d/%d, sticky=%t)",
 			requestModel, group.Mode, channel.Name, item.ModelName,
+			c.Request.Method, c.Request.URL.Path, probedRequest.RawPath,
+			probedRequest.RequestKind, probedRequest.InboundFormat, outAdapter.TargetFormat(),
 			iter.Index()+1, iter.Len(), iter.IsSticky())
 
 		// 构造尝试级上下文 -- 只写变化的 4 个字段
@@ -234,14 +236,16 @@ func parseRequest(inboundType inbound.InboundType, c *gin.Context) (*model.Probe
 	ctx := model.WithRequestPath(c.Request.Context(), c.Request.URL.Path)
 	probedRequest, err := inAdapter.Probe(ctx, body)
 	if err != nil {
+		log.Warnf("relay request probe failed: inbound=%v, method=%s, path=%s, query=%s, error=%v",
+			inboundType, c.Request.Method, c.Request.URL.Path, c.Request.URL.RawQuery, err)
 		resp.Error(c, http.StatusInternalServerError, err.Error())
 		return nil, nil, err
 	}
 
 	// Pass through the original query parameters
 	probedRequest.Query = c.Request.URL.Query()
-	// Store path suffix (after /v1) for URL passthrough in same-protocol relay
-	probedRequest.RawPath = strings.TrimPrefix(c.Request.URL.Path, "/v1")
+	// Store path suffix for URL passthrough in same-protocol relay.
+	probedRequest.RawPath = relayRawPath(c.Request.URL.Path)
 
 	// Sub-paths of known protocol endpoints are sidecar: same-format passthrough,
 	// errors are logged but never trip the circuit breaker.
@@ -250,7 +254,9 @@ func parseRequest(inboundType inbound.InboundType, c *gin.Context) (*model.Probe
 	}
 
 	if probedRequest.Model == "" {
-		err = fmt.Errorf("model is required")
+		err = fmt.Errorf("model is required: could not extract model from request path %q", c.Request.URL.Path)
+		log.Warnf("relay request rejected with 403: incompatible endpoint or missing model, inbound=%v, method=%s, path=%s, raw_path=%s, error=%v",
+			inboundType, c.Request.Method, c.Request.URL.Path, probedRequest.RawPath, err)
 		resp.Error(c, http.StatusForbidden, err.Error())
 		return nil, nil, err
 	}
@@ -269,6 +275,21 @@ func isCompatiblePassthrough(req *model.ProbedRequest, outAdapter model.Outbound
 		return true
 	default:
 		return false
+	}
+}
+
+func relayRawPath(path string) string {
+	switch {
+	case path == "/v1":
+		return ""
+	case strings.HasPrefix(path, "/v1/"):
+		return strings.TrimPrefix(path, "/v1")
+	case path == "/v1beta":
+		return ""
+	case strings.HasPrefix(path, "/v1beta/"):
+		return strings.TrimPrefix(path, "/v1beta")
+	default:
+		return path
 	}
 }
 
