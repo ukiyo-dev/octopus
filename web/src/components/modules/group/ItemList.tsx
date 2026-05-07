@@ -278,7 +278,7 @@ export function MemberList({
     };
 
     return (
-        <div className="relative h-full min-h-0">
+        <div className="relative h-full min-h-0 max-h-[inherit]">
             <div
                 className={cn(
                     'absolute inset-0 flex flex-col items-center justify-center gap-2 text-muted-foreground',
@@ -292,7 +292,7 @@ export function MemberList({
 
             <div
                 className={cn(
-                    'h-full overflow-y-auto transition-opacity duration-200',
+                    'h-full max-h-[inherit] overflow-y-auto transition-opacity duration-200',
                     isEmpty ? 'opacity-0' : 'opacity-100'
                 )}
                 ref={scrollContainerRef}
